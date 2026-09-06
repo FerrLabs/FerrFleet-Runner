@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# GitHub-hosted, not the org's self-hosted pool. This repository is public, so a
+# fork's pull request can propose the workflow that runs on it; pointing that at
+# our own cluster would hand an arbitrary contributor a shell on it.
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # The whole workspace, not the current package. The root manifest here is
+      # virtual so `cargo test` would cover both members anyway, but saying it
+      # explicitly is what keeps that true if a root package is ever added.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build
+        run: cargo build --workspace --release
+
+  image:
+    name: Image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Built but not pushed. A pull request must not be able to publish, and
+      # an image that only breaks at release time breaks at the worst moment.
+      - name: Build the image
+        run: docker build --tag ferrfleet-runner:ci .

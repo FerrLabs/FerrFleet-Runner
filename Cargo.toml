@@ -1,0 +1,44 @@
+[workspace]
+members = ["shared", "runner"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+authors = ["FerrLabs"]
+rust-version = "1.88"
+repository = "https://github.com/FerrLabs/FerrFleet-Runner"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[workspace.dependencies]
+ferrfleet-shared = { version = "0.1.0", path = "shared" }
+
+tokio = { version = "1", features = ["full"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+
+anyhow = "1"
+thiserror = "2"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Symbols are of no use to anyone reading a container log, and the binary is
+# pulled on every run of every pipeline that uses it.
+[profile.release]
+strip = "symbols"

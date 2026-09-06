@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/ferrlabs/ferrfleet/runner
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish a signed image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Keyless signing: cosign exchanges this OIDC token for a short-lived
+      # certificate bound to this workflow's identity, so what a verifier
+      # checks is "built by this workflow in this repository" rather than
+      # "signed by whoever holds a key we have to store somewhere".
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # A moving major tag for people who want fixes without a bump, the
+          # full version for people who want to know what they pinned, and the
+          # digest below for people who mean it.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Provenance and SBOM ride with the image rather than as a separate
+          # artefact nobody fetches.
+          provenance: mode=max
+          sbom: true
+
+      - uses: sigstore/cosign-installer@v3
+
+      # By digest, never by tag: a tag can move between the push above and this
+      # step, and signing whatever the tag points at then signs something else.
+      - name: Sign the image
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - name: Say what to verify against
+        run: |
+          echo "Pushed ${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo '```bash'
+            echo "cosign verify ${IMAGE}@${DIGEST} \\"
+            echo "  --certificate-identity-regexp '^https://github.com/FerrLabs/FerrFleet-Runner/' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
