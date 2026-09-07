@@ -1,0 +1,136 @@
+name: 'FerrFleet Agent'
+description: 'Run a FerrFleet agent on your own runner, on your own Claude credential'
+author: 'FerrLabs'
+
+branding:
+  icon: 'cpu'
+  color: 'yellow'
+
+inputs:
+  agent:
+    description: 'Agent id to run. It must be set to an external runner in FerrFleet, otherwise the API refuses the run.'
+    required: true
+  token:
+    description: 'FerrFleet organization token carrying the `agents:run` scope. A personal token cannot create a run: it resolves to a human and is stripped of its org.'
+    required: true
+  claude-token:
+    description: 'Your Claude Code OAuth token. It never reaches FerrFleet; the agent runs on it here.'
+    required: true
+  repo:
+    description: 'Repository the run is about. Defaults to the one this workflow runs in.'
+    required: false
+    default: ${{ github.repository }}
+  pr-number:
+    description: 'Pull request number, when the run is about one. Defaults to the PR that triggered this workflow, and is empty otherwise.'
+    required: false
+    default: ${{ github.event.pull_request.number }}
+  api-url:
+    description: 'Base URL of the FerrFleet API. Routes sit at its root.'
+    required: false
+    default: 'https://api.ferrfleet.com'
+  image:
+    description: 'Runner image. Pin it by digest in anything you care about.'
+    required: false
+    default: 'ghcr.io/ferrlabs/ferrfleet/runner:1'
+
+outputs:
+  run-id:
+    description: 'The run that was created, whether or not this job is the one that executed it.'
+    value: ${{ steps.run.outputs.run-id }}
+  url:
+    description: 'Where to read the run and its transcript.'
+    value: ${{ steps.run.outputs.url }}
+
+runs:
+  using: composite
+  steps:
+    # Creating the run and executing it are one step on purpose. The run token
+    # authenticates the container, and passing it between steps would mean
+    # writing a bearer token to a step output: masked in the log, still
+    # persisted with the workflow run. Here it never leaves this shell.
+    - id: run
+      name: Run the agent
+      shell: bash
+      env:
+        FERRFLEET_ORG_TOKEN: ${{ inputs.token }}
+        API_URL: ${{ inputs.api-url }}
+        AGENT: ${{ inputs.agent }}
+        REPO: ${{ inputs.repo }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        IMAGE: ${{ inputs.image }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-token }}
+      run: |
+        set -euo pipefail
+
+        # `pr_number` is omitted rather than sent as null when this workflow was
+        # not triggered by a pull request: the field is optional on the API and
+        # a null is a different thing from an absent one.
+        if [ -n "${PR_NUMBER}" ]; then
+          body=$(jq -nc --arg repo "${REPO}" --argjson pr "${PR_NUMBER}" \
+            '{repo: $repo, pr_number: $pr}')
+        else
+          body=$(jq -nc --arg repo "${REPO}" '{repo: $repo}')
+        fi
+
+        # Body and status separately, so a refusal is reported with what the API
+        # actually said rather than as an empty failure.
+        response=$(mktemp)
+        code=$(curl -sS -o "${response}" -w '%{http_code}' -X POST \
+          -H "Authorization: Bearer ${FERRFLEET_ORG_TOKEN}" \
+          -H 'Content-Type: application/json' \
+          -d "${body}" \
+          "${API_URL%/}/agents/${AGENT}/runs")
+
+        case "${code}" in
+          201|202) ;;
+          409)
+            echo "::error::Agent '${AGENT}' is not set to an external runner, so FerrFleet runs it itself. Switch its Runner setting to 'Your own' in the dashboard."
+            exit 1 ;;
+          403)
+            echo "::error::This token is missing the 'agents:run' scope."
+            exit 1 ;;
+          404)
+            echo "::error::No such agent for this token's organization. A personal token cannot create a run: use an organization token."
+            exit 1 ;;
+          *)
+            echo "::error::Creating the run failed (HTTP ${code}): $(cat "${response}")"
+            exit 1 ;;
+        esac
+
+        run_token=$(jq -r '.run_token // empty' "${response}")
+        # Before anything else can echo it, and before the run id is written
+        # anywhere. A run token is a bearer token for that run.
+        if [ -n "${run_token}" ]; then
+          echo "::add-mask::${run_token}"
+        fi
+
+        run_id=$(jq -r '.run_id' "${response}")
+        {
+          echo "run-id=${run_id}"
+          echo "url=${API_URL%/}/runs/${run_id}"
+        } >> "${GITHUB_OUTPUT}"
+        echo "Created run [\`${run_id}\`](${API_URL%/}/runs/${run_id})" >> "${GITHUB_STEP_SUMMARY}"
+
+        if [ -z "${run_token}" ]; then
+          echo "::error::The API returned no run token, which means this agent is not on an external runner."
+          exit 1
+        fi
+
+        if [ "${code}" = "202" ]; then
+          reason=$(jq -r '.reason // "unknown"' "${response}")
+          echo "::error::Run ${run_id} was queued rather than started (${reason}), so there is nothing to execute here."
+          exit 1
+        fi
+
+        # `GITHUB_REPOSITORY` and `GITHUB_RUN_ID` are what the runner builds its
+        # claim label from, so the run page points back at this job. A runner
+        # that loses the claim to a concurrent one exits 0 having done nothing,
+        # which is a success: the work is happening elsewhere.
+        FERRFLEET_API_URL="${API_URL%/}" \
+        FERRFLEET_RUN_ID="${run_id}" \
+        FERRFLEET_RUN_TOKEN="${run_token}" \
+        docker run --rm \
+          -e FERRFLEET_API_URL -e FERRFLEET_RUN_ID -e FERRFLEET_RUN_TOKEN \
+          -e CLAUDE_CODE_OAUTH_TOKEN \
+          -e GITHUB_REPOSITORY -e GITHUB_RUN_ID \
+          "${IMAGE}"

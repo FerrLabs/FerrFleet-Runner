@@ -28,7 +28,50 @@ It holds no credential of its own. The GitHub token it pushes with is minted
 per run by the API, scoped to that run's repository, and fetched at the moment
 it is needed; the private key that mints it never leaves the API.
 
-## Running one
+## Using it from GitHub Actions
+
+The action in this repository does both halves: it creates the run against the
+API and executes it here.
+
+```yaml
+name: review
+on: pull_request
+
+jobs:
+  ferrfleet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: FerrLabs/FerrFleet-Runner@v1
+        with:
+          agent: pr-agent
+          token: ${{ secrets.FERRFLEET_ORG_TOKEN }}
+          claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+```
+
+`token` must be a FerrFleet **organization** token carrying the `agents:run`
+scope. A personal token resolves to a human and is stripped of its org before it
+reaches an org-scoped route, so it cannot create a run at all.
+
+The agent must be set to an external runner in FerrFleet. If it is not, the API
+answers `409` and the action says so rather than failing obscurely: FerrFleet
+runs that agent itself, and a second run started here would be a duplicate.
+
+Outputs are `run-id` and `url`, set as soon as the run exists, so a later step
+can comment the link on the pull request even when the run itself failed.
+
+### What makes the step fail
+
+The run failing: a non-zero exit from the agent, a refusal from the API, a run
+that came back queued rather than started.
+
+Not the agent's findings. A finished run reports `status` and `exit_code` and
+nothing structured about what it concluded, so a step that failed on "the
+reviewer found something" would have to pattern-match the transcript. That is
+the kind of check that passes for months and then quietly stops matching. If you
+want FerrFleet to gate a merge today, read `run-id` in a later step and decide
+there.
+
+### Running it without the action
 
 ```bash
 docker run --rm \
@@ -37,10 +80,9 @@ docker run --rm \
   ghcr.io/ferrlabs/ferrfleet/runner:1
 ```
 
-Creating the run first, and wiring this into GitHub Actions or any other CI, is
-covered in [the external runners guide][guide].
-
-[guide]: https://github.com/FerrLabs/FerrFleet-Cloud/blob/main/docs/external-runners.md
+Creating the run first is one HTTP call, covered in
+[the external runners guide][guide]. Nothing about this is GitHub-specific:
+any CI that can make a request and run a container works the same way.
 
 ## Two runners on one run
 

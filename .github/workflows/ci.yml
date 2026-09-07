@@ -51,3 +51,17 @@ jobs:
       # an image that only breaks at release time breaks at the worst moment.
       - name: Build the image
         run: docker build --tag ferrfleet-runner:ci .
+
+  action:
+    name: Action manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # The action is the surface most people will meet first, and its whole
+      # body is a shell script inside a YAML string: neither the Rust build nor
+      # a human review reliably catches a quoting mistake in there.
+      - name: Lint the workflows and the action
+        uses: raven-actions/actionlint@v2
+        with:
+          shellcheck: true
