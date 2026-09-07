@@ -10,6 +10,14 @@ RUN cargo build --release --bin ferrfleet-runner
 
 FROM debian:bookworm-slim AS runtime
 
+# `image.source` is what the GHCR package page links to. Without it the package
+# keeps whatever repository first published it, which here was the private
+# FerrFleet-Cloud: a public image whose "source" link lands on a 404 for the
+# people it was made public for.
+LABEL org.opencontainers.image.source="https://github.com/FerrLabs/FerrFleet-Runner" \
+      org.opencontainers.image.description="Executes one FerrFleet agent run." \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 # `jq` and `python3` are here because agent prompts call them: without them a
 # run still exits 0 while the step silently did nothing.
 RUN apt-get update \
