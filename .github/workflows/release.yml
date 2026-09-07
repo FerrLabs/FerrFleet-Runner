@@ -2,7 +2,12 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
+    # Full versions only. The moving major tag (`v1`) is what
+    # `uses: FerrLabs/FerrFleet-Runner@v1` resolves against, and it gets
+    # repointed at every release. Triggering on it would rebuild the same
+    # commit, and `type=semver` produces nothing from a bare `v1` anyway, so
+    # the run would publish an image under no tag at all.
+    tags: ['v*.*.*']
   workflow_dispatch:
 
 env:
