@@ -123,6 +123,25 @@ cargo build --release --bin ferrfleet-runner
 No private registry and no credentials: every dependency is public. That is
 deliberate, and worth keeping true.
 
+## Releasing
+
+Tag a full version and push it. The workflow builds, pushes, signs with cosign
+and attaches an SBOM, tagging the image `1.2.3`, `1` and `latest`.
+
+```bash
+git tag -a v1.2.3 -m "..." && git push origin v1.2.3
+```
+
+Then repoint the moving major tag, which is what
+`uses: FerrLabs/FerrFleet-Runner@v1` resolves against:
+
+```bash
+git tag -f v1 && git push -f origin v1
+```
+
+That one deliberately does not trigger a release: the workflow matches
+`v*.*.*` only, so moving it rebuilds nothing.
+
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).
