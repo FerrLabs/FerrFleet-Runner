@@ -19,7 +19,7 @@ jobs:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install the toolchain
         run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
@@ -45,7 +45,7 @@ jobs:
     name: Image builds
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Built but not pushed. A pull request must not be able to publish, and
       # an image that only breaks at release time breaks at the worst moment.
@@ -56,7 +56,7 @@ jobs:
     name: Action manifest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # The action is the surface most people will meet first, and its whole
       # body is a shell script inside a YAML string: neither the Rust build nor
