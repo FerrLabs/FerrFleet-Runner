@@ -41,6 +41,19 @@ jobs:
       - name: Build
         run: cargo build --workspace --release
 
+  deny:
+    name: Cargo Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny
+        run: cargo deny check
+
   image:
     name: Image builds
     runs-on: ubuntu-latest
