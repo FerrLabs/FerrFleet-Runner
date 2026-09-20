@@ -76,7 +76,7 @@ jobs:
             -e FERRFLEET_API_URL=https://example.com \
             -e FERRFLEET_RUN_ID=01999999-9999-7999-9999-999999999999 \
             -e FERRFLEET_RUN_TOKEN=not-a-real-token \
-            ferrfleet-runner:ci 2>&1)
+            ferrfleet-runner:ci 2>&1 || true)
           printf '%s\n' "$out"
           if printf '%s' "$out" | grep -qiE 'CryptoProvider|invalid peer certificate|UnknownIssuer'; then
             echo "::error::the image cannot negotiate TLS"
