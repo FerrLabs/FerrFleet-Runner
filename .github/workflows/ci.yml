@@ -65,6 +65,28 @@ jobs:
       - name: Build the image
         run: docker build --tag ferrfleet-runner:ci .
 
+      # A TLS backend that cannot handshake still builds, still passes clippy
+      # and still starts. It fails at the first request, in someone else's
+      # pipeline. This is the only step that makes the binary open a real
+      # connection.
+      - name: The image completes a TLS handshake
+        run: |
+          set -uo pipefail
+          out=$(docker run --rm \
+            -e FERRFLEET_API_URL=https://example.com \
+            -e FERRFLEET_RUN_ID=01999999-9999-7999-9999-999999999999 \
+            -e FERRFLEET_RUN_TOKEN=not-a-real-token \
+            ferrfleet-runner:ci 2>&1 || true)
+          printf '%s\n' "$out"
+          if printf '%s' "$out" | grep -qiE 'CryptoProvider|invalid peer certificate|UnknownIssuer'; then
+            echo "::error::the image cannot negotiate TLS"
+            exit 1
+          fi
+          printf '%s' "$out" | grep -q 'HTTP status client error' || {
+            echo "::error::no HTTP response came back, so nothing proves TLS worked"
+            exit 1
+          }
+
   action:
     name: Action manifest
     runs-on: ubuntu-latest
