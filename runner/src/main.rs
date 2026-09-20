@@ -21,6 +21,7 @@ use sender::EventSender;
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
+    install_crypto_provider()?;
 
     // Sous-commandes dediees, appelees par l'agent lui-meme (pas par le
     // superviseur de run). Verifiees avant tout le reste: elles ne doivent
@@ -816,6 +817,12 @@ struct TokenTotals {
     output: u32,
     cache_creation: u32,
     cache_read: u32,
+}
+
+fn install_crypto_provider() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("a rustls crypto provider was already installed"))
 }
 
 fn init_tracing() {
