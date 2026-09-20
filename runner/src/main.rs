@@ -242,12 +242,6 @@ async fn run(env: &Env, sender: &EventSender) -> Result<()> {
 
 /// Appended to every run's system prompt, so an agent does not spend a turn
 /// discovering its environment.
-///
-/// Every sentence has to hold on a runner that is not our image: the same
-/// binary now executes runs directly on someone else's CI, where the working
-/// directory is wherever that CI could write and `gh` may well be installed.
-/// A note that says otherwise is worse than no note, because the agent
-/// believes it.
 fn runner_environment_note(working_dir: &str) -> String {
     format!(
         "Environment: you are executing a FerrFleet agent run. Use the MCP \
