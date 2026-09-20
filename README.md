@@ -59,6 +59,41 @@ runs that agent itself, and a second run started here would be a duplicate.
 Outputs are `run-id` and `url`, set as soon as the run exists, so a later step
 can comment the link on the pull request even when the run itself failed.
 
+### Runners without a Docker daemon
+
+The default runs the published image, which needs a daemon. A hardened
+self-hosted runner usually has none: a non-privileged Kubernetes pod has no
+socket and no `dind` sidecar, and granting it one means granting root on the
+node. `mode: binary` downloads the release binary for the runner's architecture
+and executes it directly.
+
+```yaml
+      - uses: FerrLabs/FerrFleet-Runner@v1
+        with:
+          mode: binary
+          agent: pr-agent
+          token: ${{ secrets.FERRFLEET_ORG_TOKEN }}
+          claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+```
+
+What the runner has to provide: Linux on x86_64 or aarch64, and `curl`, `git`,
+`jq`, `tar` and `sha256sum` on PATH. The step checks all of that before the run
+is created, so a missing tool fails the job rather than leaving a claimed run
+with nothing executing it. `python3` is only warned about, because agent prompts
+are told it is there.
+
+The Claude CLI is installed into `~/.local/bin` unless `claude` is already on
+PATH, in which case yours is used as it is. Pin it with `claude-cli-version` if
+you want a specific one on a runner that has none.
+
+`version` picks the release: a bare major such as `1` takes the newest release
+of that major, matching what `image: ...runner:1` does, and a full `1.2.3` takes
+that one exactly.
+
+The agent runs in `$RUNNER_TEMP/ferrfleet-workdir` rather than the `/workdir` of
+the image, and is told so in its system prompt. Nothing else differs: the same
+binary does the same work, and the run looks identical from FerrFleet's side.
+
 ### What makes the step fail
 
 The run failing: a non-zero exit from the agent, a refusal from the API, a run
@@ -80,9 +115,20 @@ docker run --rm \
   ghcr.io/ferrlabs/ferrfleet/runner:1
 ```
 
+Or without a container at all, on any Linux host:
+
+```bash
+FERRFLEET_WORKING_DIR=/tmp/ferrfleet-workdir ferrfleet-runner
+```
+
 Creating the run first is one HTTP call, covered in
 [the external runners guide][guide]. Nothing about this is GitHub-specific:
-any CI that can make a request and run a container works the same way.
+any CI that can make a request and run a container, or just a binary, works the
+same way.
+
+`FERRFLEET_WORKING_DIR` overrides the working directory the API asks for, which
+is the `/workdir` of the image. Set it anywhere you can write. It is also what
+the agent is told its working directory is, so the two cannot drift apart.
 
 ## Two runners on one run
 
@@ -114,6 +160,18 @@ cosign verify ghcr.io/ferrlabs/ferrfleet/runner:1 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
+Every release carries `checksums.txt` over its binaries, and a cosign bundle
+over that file. The action checks the hash, which catches a truncated download.
+The signature is what catches a swapped asset, and checking it is on you:
+
+```bash
+cosign verify-blob checksums.txt \
+  --bundle checksums.txt.bundle \
+  --certificate-identity-regexp '^https://github.com/FerrLabs/FerrFleet-Runner/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum --check --strict checksums.txt
+```
+
 ## Building it yourself
 
 ```bash
@@ -126,7 +184,11 @@ deliberate, and worth keeping true.
 ## Releasing
 
 Tag a full version and push it. The workflow builds, pushes, signs with cosign
-and attaches an SBOM, tagging the image `1.2.3`, `1` and `latest`.
+and attaches an SBOM, tagging the image `1.2.3`, `1` and `latest`. It also
+builds the static musl binaries for x86_64 and aarch64, and publishes a GitHub
+release carrying them, their `checksums.txt` and its cosign bundle. That release
+is what `mode: binary` downloads, so a version with no release cannot be used
+that way.
 
 ```bash
 git tag -a v1.2.3 -m "..." && git push origin v1.2.3
