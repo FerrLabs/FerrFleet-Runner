@@ -64,8 +64,8 @@ runs:
   using: composite
   steps:
     # Only in `binary` mode, and in its own step: nothing here touches the run
-    # token, and `GITHUB_PATH` only takes effect in the step after the one that
-    # writes it, which is where the runner is executed.
+    # token, and what it installs reaches the run step as outputs rather than
+    # as job-wide PATH entries.
     - id: install
       name: Install the runner
       if: inputs.mode == 'binary'
