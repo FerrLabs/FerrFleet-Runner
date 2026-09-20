@@ -90,9 +90,22 @@ you want a specific one on a runner that has none.
 of that major, matching what `image: ...runner:1` does, and a full `1.2.3` takes
 that one exactly.
 
-The agent runs in `$RUNNER_TEMP/ferrfleet-workdir` rather than the `/workdir` of
-the image, and is told so in its system prompt. Nothing else differs: the same
-binary does the same work, and the run looks identical from FerrFleet's side.
+The agent runs in a fresh `$RUNNER_TEMP/ferrfleet-workdir-XXXXXX` rather than the
+`/workdir` of the image, and is told so in its system prompt. The run looks
+identical from FerrFleet's side.
+
+What does differ, and it is the thing to weigh: the container was the isolation
+boundary, and binary mode removes it. An agent runs under `bypassPermissions`,
+so in docker mode "only the working directory is writable" is enforced by the
+container, while here the same sentence in the system prompt is advice. The
+agent has the job's workspace, `$HOME`, and whatever else that runner holds, and
+a self-hosted runner usually holds more than a hosted one. The org token is kept
+out of its environment deliberately, and the run token it does get dies with the
+run, but nothing stops the agent reading the rest of the machine.
+
+So the choice is not "hardened runner, therefore binary mode". It is a daemon on
+the runner, or an agent with the run of it. If both are unacceptable, a
+throwaway hosted runner in docker mode is the third option.
 
 ### What makes the step fail
 
