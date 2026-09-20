@@ -87,7 +87,6 @@ jobs:
 
   binaries:
     name: Build ${{ matrix.target }}
-    # A dispatch has no tag, and the assets below are attached to one.
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -100,14 +99,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # Nothing here needs git credentials, and this job uploads what it
-          # builds out of this workspace.
           persist-credentials: false
 
-      # musl rather than glibc, and each target built on its own architecture
-      # rather than cross-compiled. The result is a static binary that runs on
-      # a distroless or alpine runner and does not care which glibc the host
-      # shipped, which is the whole point of offering a binary at all.
       - name: Install the toolchain
         env:
           TARGET: ${{ matrix.target }}
@@ -158,11 +151,6 @@ jobs:
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      # One signature over the checksums rather than one per archive: the
-      # checksums cover every asset, so a verifier checks one bundle and then
-      # the hashes. The action verifies the hashes only, which catches a
-      # truncated download; this bundle is what catches a swapped asset, for
-      # anyone who checks it.
       - name: Sign the checksums
         run: cosign sign-blob --yes --bundle dist/checksums.txt.bundle dist/checksums.txt
 
