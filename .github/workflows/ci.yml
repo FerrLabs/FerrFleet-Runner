@@ -58,6 +58,9 @@ jobs:
     name: Static binary
     runs-on: ${{ matrix.runner }}
     strategy:
+      # Both targets are published, so both results are wanted. Letting one
+      # cancel the other hides which of them actually broke.
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
@@ -101,8 +104,8 @@ jobs:
             -e FERRFLEET_RUN_TOKEN=not-a-real-token \
             alpine:3 /b/ferrfleet-runner 2>&1 || true)
           printf '%s\n' "$out"
-          if printf '%s' "$out" | grep -qiE 'CryptoProvider|invalid peer certificate|UnknownIssuer|not found'; then
-            echo "::error::the static binary cannot run or cannot negotiate TLS"
+          if printf '%s' "$out" | grep -qiE 'CryptoProvider|invalid peer certificate|UnknownIssuer'; then
+            echo "::error::the static binary cannot negotiate TLS"
             exit 1
           fi
           printf '%s' "$out" | grep -q 'HTTP status client error' || {
