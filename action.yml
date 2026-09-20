@@ -28,10 +28,29 @@ inputs:
     description: 'Base URL of the FerrFleet API. Routes sit at its root.'
     required: false
     default: 'https://api.ferrfleet.com'
+  mode:
+    description: >-
+      How the runner is executed. `docker` runs the published image and needs a
+      daemon. `binary` downloads the release binary and runs it directly, for
+      runners that have no daemon, such as a non-privileged Kubernetes pod.
+    required: false
+    default: 'docker'
   image:
-    description: 'Runner image. Pin it by digest in anything you care about.'
+    description: 'Runner image, in `docker` mode. Pin it by digest in anything you care about.'
     required: false
     default: 'ghcr.io/ferrlabs/ferrfleet/runner:1'
+  version:
+    description: >-
+      Which runner release to download in `binary` mode. A bare major takes the
+      newest release of that major, a full `1.2.3` takes that one exactly.
+    required: false
+    default: '1'
+  claude-cli-version:
+    description: >-
+      Claude Code CLI version installed in `binary` mode. Ignored when `claude`
+      is already on PATH, which is how a self-hosted runner pins its own.
+    required: false
+    default: 'latest'
 
 outputs:
   run-id:
@@ -44,6 +63,122 @@ outputs:
 runs:
   using: composite
   steps:
+    # Only in `binary` mode, and in its own step: nothing here touches the run
+    # token, and `GITHUB_PATH` only takes effect in the step after the one that
+    # writes it, which is where the runner is executed.
+    - id: install
+      name: Install the runner
+      if: inputs.mode == 'binary'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        CLAUDE_CLI_VERSION: ${{ inputs.claude-cli-version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        repo='FerrLabs/FerrFleet-Runner'
+
+        if [ "$(uname -s)" != Linux ]; then
+          echo "::error::Binary mode is Linux only. The runner uses std::os::unix and does not build elsewhere; use mode: docker, or a Linux runner."
+          exit 1
+        fi
+
+        case "$(uname -m)" in
+          x86_64) target='x86_64-unknown-linux-musl' ;;
+          aarch64|arm64) target='aarch64-unknown-linux-musl' ;;
+          *)
+            echo "::error::No runner build for $(uname -m). Released targets are x86_64 and aarch64 Linux."
+            exit 1 ;;
+        esac
+
+        # Checked here rather than left to fail mid-run: a missing `git` only
+        # surfaces once the agent tries to check out, by which point the run
+        # exists and has burned its claim.
+        for tool in curl git jq sha256sum tar; do
+          command -v "${tool}" >/dev/null || {
+            echo "::error::Binary mode needs ${tool} on the runner, and it is not on PATH."
+            exit 1
+          }
+        done
+        command -v python3 >/dev/null || \
+          echo "::warning::python3 is not on this runner, and agent prompts are told it is available."
+
+        if printf '%s' "${VERSION}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          tag="v${VERSION}"
+        else
+          # A workflow can run without a token, and an empty Bearer header is a
+          # 401 rather than an anonymous request.
+          auth=()
+          if [ -n "${GH_TOKEN:-}" ]; then
+            auth=(-H "Authorization: Bearer ${GH_TOKEN}")
+          fi
+
+          releases=$(curl -sSL "${auth[@]}" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${repo}/releases?per_page=100") || {
+            echo "::error::Could not reach the GitHub releases API to resolve version '${VERSION}'."
+            exit 1
+          }
+
+          # The list comes back newest first, so the first match on the major is
+          # the newest release of it. A rate-limit or an error body is an object,
+          # not an array, and must not read as "no such release".
+          tag=$(printf '%s' "${releases}" | jq -r --arg prefix "v${VERSION}." '
+              if type == "array" then
+                [.[] | select(.draft | not) | select(.prerelease | not)
+                     | .tag_name | select(startswith($prefix))] | first // empty
+              else
+                "not-an-array"
+              end')
+
+          if [ "${tag}" = not-an-array ]; then
+            echo "::error::The GitHub releases API answered with $(printf '%s' "${releases}" | jq -r '.message // "an unexpected body"')."
+            exit 1
+          fi
+          [ -n "${tag}" ] || {
+            echo "::error::No published release matches version '${VERSION}'. Pass a full version, or check the releases page."
+            exit 1
+          }
+        fi
+
+        dir="${RUNNER_TEMP}/ferrfleet-runner"
+        asset="ferrfleet-runner-${target}.tar.gz"
+        mkdir -p "${dir}/bin"
+        base="https://github.com/${repo}/releases/download/${tag}"
+
+        curl -fsSL -o "${dir}/${asset}" "${base}/${asset}"
+        curl -fsSL -o "${dir}/checksums.txt" "${base}/checksums.txt"
+
+        # Guards a truncated or corrupted download, not a compromised release:
+        # the checksums come from the same place as the archive. The README says
+        # how to verify the cosign signature on checksums.txt when that matters.
+        ( cd "${dir}" && grep -F " ${asset}" checksums.txt | sha256sum --check --strict - ) || {
+          echo "::error::${asset} does not match its published checksum."
+          exit 1
+        }
+
+        tar -xzf "${dir}/${asset}" -C "${dir}/bin" ferrfleet-runner
+        chmod +x "${dir}/bin/ferrfleet-runner"
+
+        # Handed to the next step as a path rather than pushed onto
+        # `GITHUB_PATH`: the run step needs one binary, not a PATH entry that
+        # every later step in the job inherits.
+        echo "runner=${dir}/bin/ferrfleet-runner" >> "${GITHUB_OUTPUT}"
+        echo "Installed ferrfleet-runner ${tag} (${target})"
+
+        # A self-hosted runner that pins its own CLI keeps it. Installing over
+        # it would silently change the version an operator chose.
+        if command -v claude >/dev/null; then
+          echo "Using the Claude CLI already on this runner: $(claude --version)"
+        else
+          curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CLI_VERSION}"
+          "${HOME}/.local/bin/claude" --version
+          # The runner spawns `claude` by name, so this one does need to be on
+          # a PATH. Exported in the next step only, not job-wide.
+          echo "claude-bin=${HOME}/.local/bin" >> "${GITHUB_OUTPUT}"
+        fi
+
     # Creating the run and executing it are one step on purpose. The run token
     # authenticates the container, and passing it between steps would mean
     # writing a bearer token to a step output: masked in the log, still
@@ -58,9 +193,20 @@ runs:
         REPO: ${{ inputs.repo }}
         PR_NUMBER: ${{ inputs.pr-number }}
         IMAGE: ${{ inputs.image }}
+        MODE: ${{ inputs.mode }}
+        FERRFLEET_RUNNER_BIN: ${{ steps.install.outputs.runner }}
+        CLAUDE_CLI_BIN: ${{ steps.install.outputs.claude-bin }}
         CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-token }}
       run: |
         set -euo pipefail
+        # Before the run is created, not at the exec below: a typo caught after
+        # the POST leaves a claimed run with no executor behind it.
+        case "${MODE}" in
+          docker|binary) ;;
+          *)
+            echo "::error::mode must be 'docker' or 'binary', got '${MODE}'."
+            exit 1 ;;
+        esac
 
         # `pr_number` is omitted rather than sent as null when this workflow was
         # not triggered by a pull request: the field is optional on the API and
@@ -126,11 +272,36 @@ runs:
         # claim label from, so the run page points back at this job. A runner
         # that loses the claim to a concurrent one exits 0 having done nothing,
         # which is a success: the work is happening elsewhere.
-        FERRFLEET_API_URL="${API_URL%/}" \
-        FERRFLEET_RUN_ID="${run_id}" \
-        FERRFLEET_RUN_TOKEN="${run_token}" \
-        docker run --rm \
-          -e FERRFLEET_API_URL -e FERRFLEET_RUN_ID -e FERRFLEET_RUN_TOKEN \
-          -e CLAUDE_CODE_OAUTH_TOKEN \
-          -e GITHUB_REPOSITORY -e GITHUB_RUN_ID \
-          "${IMAGE}"
+        export FERRFLEET_API_URL="${API_URL%/}"
+        export FERRFLEET_RUN_ID="${run_id}"
+        export FERRFLEET_RUN_TOKEN="${run_token}"
+
+        if [ "${MODE}" = docker ]; then
+          docker run --rm \
+            -e FERRFLEET_API_URL -e FERRFLEET_RUN_ID -e FERRFLEET_RUN_TOKEN \
+            -e CLAUDE_CODE_OAUTH_TOKEN \
+            -e GITHUB_REPOSITORY -e GITHUB_RUN_ID \
+            "${IMAGE}"
+        else
+          if [ -n "${CLAUDE_CLI_BIN:-}" ]; then
+            PATH="${CLAUDE_CLI_BIN}:${PATH}"
+            export PATH
+          fi
+
+          # The API sends the `/workdir` of our image, which does not exist on a
+          # runner that is not it. Fresh each time rather than fixed: the clone
+          # is `git clone <url> .`, which refuses a directory that already has
+          # something in it, so a second use of this action in one job would
+          # fail after its run was created and claimed.
+          workdir=$(mktemp -d "${RUNNER_TEMP}/ferrfleet-workdir-XXXXXX")
+
+          # The docker branch above passes an allowlist of variables, so the org
+          # token never enters the container. Here the runner is a child of this
+          # shell and `claude` a child of the runner, so without this the agent
+          # runs under `bypassPermissions` with an org-wide `agents:run`
+          # credential in its environment. The run token it does get is scoped
+          # to this run and dies with it.
+          env -u FERRFLEET_ORG_TOKEN \
+            FERRFLEET_WORKING_DIR="${workdir}" \
+            "${FERRFLEET_RUNNER_BIN}"
+        fi

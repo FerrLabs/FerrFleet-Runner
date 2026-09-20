@@ -117,7 +117,7 @@ async fn run_pull_request_subcommand(args: &[String]) -> Result<()> {
 }
 
 async fn run(env: &Env, sender: &EventSender) -> Result<()> {
-    let cfg = sender.fetch_config().await?;
+    let mut cfg = sender.fetch_config().await?;
     if cfg.run_id.to_string() != env.run_id {
         bail!(
             "config run_id ({}) does not match env FERRFLEET_RUN_ID ({})",
@@ -139,6 +139,8 @@ async fn run(env: &Env, sender: &EventSender) -> Result<()> {
             }
         }
     }
+
+    apply_working_dir_override(&mut cfg, env.working_dir.as_deref())?;
 
     // Garde le canal d'authentification git vivant pour toute la duree du
     // run: c'est l'agent qui pousse sa branche, pas le runner, et sans
@@ -238,20 +240,29 @@ async fn run(env: &Env, sender: &EventSender) -> Result<()> {
     Ok(())
 }
 
-/// Appended to every run's system prompt. Describes what the runner image
-/// actually provides, so an agent does not spend a turn discovering it.
-const RUNNER_ENVIRONMENT_NOTE: &str = "\
-Environment: you run in the FerrFleet runner container. The GitHub CLI (`gh`) \
-is NOT installed and will not be: use the MCP GitHub tools for every GitHub \
-operation. If an MCP GitHub tool is refused, that refusal is deliberate; do \
-not look for another way around it. Available CLI tools are `git`, `curl`, \
-`jq`, `python3` and `ferrfleet-runner`. The working directory is /workdir and \
-only /workdir and /tmp are writable. When a repository is checked out, `git \
-push` is already authenticated: push with plain `git push -u origin HEAD`, \
-never with a token in the remote URL, and never with --force. \
+/// Appended to every run's system prompt, so an agent does not spend a turn
+/// discovering its environment.
+///
+/// Every sentence has to hold on a runner that is not our image: the same
+/// binary now executes runs directly on someone else's CI, where the working
+/// directory is wherever that CI could write and `gh` may well be installed.
+/// A note that says otherwise is worse than no note, because the agent
+/// believes it.
+fn runner_environment_note(working_dir: &str) -> String {
+    format!(
+        "Environment: you are executing a FerrFleet agent run. Use the MCP \
+GitHub tools for every GitHub operation. Do NOT use the GitHub CLI (`gh`) \
+even where it is installed: it routes around the connector's denied-tool \
+list. If an MCP GitHub tool is refused, that refusal is deliberate; do not \
+look for another way around it. Available CLI tools are `git`, `curl`, `jq`, \
+`python3` and `ferrfleet-runner`. The working directory is {working_dir}, and \
+you may write there and in /tmp, nowhere else. When a repository is checked \
+out, `git push` is already authenticated: push with plain `git push -u origin \
+HEAD`, never with a token in the remote URL, and never with --force. \
 `ferrfleet-runner pull-request <url>` records the pull request you opened, \
-and `ferrfleet-runner resolve-thread <thread_id>` resolves one review \
-thread.";
+and `ferrfleet-runner resolve-thread <thread_id>` resolves one review thread."
+    )
+}
 
 /// The Vault Agent sidecar writes `CLAUDE_CODE_OAUTH_TOKEN` into a file
 /// (default `/vault/secrets/claude.env`), not into the process environment.
@@ -445,6 +456,89 @@ fn missing_context(prompt: &str, relative: &str) -> String {
          about itself. Follow your own instructions on what to do without it."
     );
     out
+}
+
+fn apply_working_dir_override(cfg: &mut RunConfig, working_dir: Option<&str>) -> Result<()> {
+    let Some(dir) = working_dir else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creation du repertoire de travail {dir}"))?;
+    dir.clone_into(&mut cfg.working_dir);
+    Ok(())
+}
+
+#[cfg(test)]
+mod environment_note_tests {
+    use super::*;
+
+    #[test]
+    fn the_note_states_the_working_directory_it_was_given() {
+        let note = runner_environment_note("/home/runner/work/_temp/ferrfleet-workdir");
+
+        assert!(
+            note.contains("The working directory is /home/runner/work/_temp/ferrfleet-workdir,")
+        );
+        assert!(!note.contains("/workdir,"));
+    }
+
+    #[test]
+    fn the_note_forbids_gh_without_claiming_it_is_absent() {
+        let note = runner_environment_note("/workdir");
+
+        assert!(note.contains("Do NOT use the GitHub CLI (`gh`)"));
+        assert!(!note.contains("is NOT installed"));
+    }
+}
+
+#[cfg(test)]
+mod working_dir_tests {
+    use super::*;
+
+    fn config(working_dir: &str) -> RunConfig {
+        serde_json::from_value(serde_json::json!({
+            "run_id": "01999999-9999-7999-9999-999999999999",
+            "agent_id": "pr-agent",
+            "prompt": "review it",
+            "working_dir": working_dir,
+        }))
+        .expect("building the fixture")
+    }
+
+    #[test]
+    fn an_override_replaces_the_api_path_and_creates_it() {
+        let dir = std::env::temp_dir().join(format!("ferrfleet-wd-{}", uuid::Uuid::new_v4()));
+        let dir = dir.to_string_lossy().into_owned();
+        let mut cfg = config("/workdir");
+
+        apply_working_dir_override(&mut cfg, Some(&dir)).expect("applying the override");
+
+        assert_eq!(cfg.working_dir, dir);
+        assert!(std::path::Path::new(&dir).is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_override_leaves_the_api_path_alone() {
+        let mut cfg = config("/workdir");
+
+        apply_working_dir_override(&mut cfg, None).expect("applying no override");
+
+        assert_eq!(cfg.working_dir, "/workdir");
+    }
+
+    #[test]
+    fn an_override_pointing_at_a_file_is_an_error_rather_than_a_silent_fallback() {
+        let file = std::env::temp_dir().join(format!("ferrfleet-wd-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&file, b"not a directory").expect("writing the fixture");
+        let mut cfg = config("/workdir");
+
+        let err = apply_working_dir_override(&mut cfg, Some(&file.to_string_lossy()));
+
+        assert!(err.is_err());
+        assert_eq!(cfg.working_dir, "/workdir");
+        let _ = std::fs::remove_file(&file);
+    }
 }
 
 #[cfg(test)]
@@ -703,12 +797,12 @@ fn build_claude_command(
     cmd.arg("--permission-mode").arg(&cfg.permission_mode);
 
     // Agents reach for `gh` unprompted — it accounted for the most frequent
-    // error across the fleet — and burn a turn on `command not found`. It is
-    // not installed on purpose: authenticating it would route around the
-    // connector's denied-tool list. Say so up front rather than letting each
-    // run rediscover it.
+    // error across the fleet. Our image leaves it out on purpose, because
+    // authenticating it would route around the connector's denied-tool list,
+    // but a runner we do not build may have it, so the note forbids it rather
+    // than claiming it is absent.
     cmd.arg("--append-system-prompt")
-        .arg(RUNNER_ENVIRONMENT_NOTE);
+        .arg(runner_environment_note(&cfg.working_dir));
 
     if let Some(mcp_config) = &cfg.mcp_config {
         let path = std::path::Path::new(&cfg.working_dir).join(".ferrfleet-mcp.json");

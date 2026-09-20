@@ -6,6 +6,7 @@ pub struct Env {
     pub api_url: String,
     pub run_id: String,
     pub run_token: String,
+    pub working_dir: Option<String>,
 }
 
 impl Env {
@@ -22,6 +23,9 @@ impl Env {
             api_url,
             run_id,
             run_token,
+            working_dir: env::var("FERRFLEET_WORKING_DIR")
+                .ok()
+                .filter(|dir| !dir.is_empty()),
         })
     }
 }

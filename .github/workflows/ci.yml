@@ -54,6 +54,69 @@ jobs:
       - name: cargo deny
         run: cargo deny check
 
+  musl:
+    name: Static binary
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Both targets are published, so both results are wanted. Letting one
+      # cancel the other hides which of them actually broke.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Nothing here needs git credentials, and this job uploads what it
+          # builds out of this workspace.
+          persist-credentials: false
+
+      - name: Install the toolchain
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup toolchain install stable --profile minimal
+          rustup target add "${TARGET}"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # The release attaches these two targets, and a build that only breaks
+      # when a tag is pushed breaks at the worst moment. Same reasoning as the
+      # image job below.
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --target "${TARGET}" --bin ferrfleet-runner
+
+      # The binary mode of the action runs this on whatever the operator's
+      # runner is, so it has to be genuinely static and carry its own roots.
+      # A bare alpine has neither a glibc nor a ca-certificates package.
+      - name: The binary runs on a bare image and completes a TLS handshake
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -uo pipefail
+          out=$(docker run --rm \
+            -v "${PWD}/target/${TARGET}/release:/b:ro" \
+            -e FERRFLEET_API_URL=https://example.com \
+            -e FERRFLEET_RUN_ID=01999999-9999-7999-9999-999999999999 \
+            -e FERRFLEET_RUN_TOKEN=not-a-real-token \
+            alpine:3 /b/ferrfleet-runner 2>&1 || true)
+          printf '%s\n' "$out"
+          if printf '%s' "$out" | grep -qiE 'CryptoProvider|invalid peer certificate|UnknownIssuer'; then
+            echo "::error::the static binary cannot negotiate TLS"
+            exit 1
+          fi
+          printf '%s' "$out" | grep -q 'HTTP status client error' || {
+            echo "::error::no HTTP response came back, so nothing proves TLS worked"
+            exit 1
+          }
+
   image:
     name: Image builds
     runs-on: ubuntu-latest
