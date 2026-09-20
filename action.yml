@@ -208,6 +208,21 @@ runs:
             exit 1 ;;
         esac
 
+        # An unset repository secret arrives as an empty string, not as a missing
+        # input, so without this the request goes out unauthenticated and the API
+        # answers 404. That is reported below as "use an organization token",
+        # which sends someone who simply forgot the secret looking at the wrong
+        # thing. Observed on a first install.
+        if [ -z "${FERRFLEET_ORG_TOKEN}" ]; then
+          echo "::error::The token input is empty. Set a FerrFleet organization token carrying the 'agents:run' scope, usually from a repository secret."
+          exit 1
+        fi
+
+        if [ -z "${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
+          echo "::error::The claude-token input is empty. The agent runs on your own Claude credential, so there is nothing to run it with."
+          exit 1
+        fi
+
         # `pr_number` is omitted rather than sent as null when this workflow was
         # not triggered by a pull request: the field is optional on the API and
         # a null is a different thing from an absent one.
