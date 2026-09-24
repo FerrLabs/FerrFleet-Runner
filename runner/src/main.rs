@@ -31,6 +31,7 @@ async fn main() -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("resolve-thread") => return run_resolve_thread_subcommand(&args).await,
         Some("pull-request") => return run_pull_request_subcommand(&args).await,
+        Some("result") => return run_result_subcommand(&args).await,
         _ => {}
     }
 
@@ -63,6 +64,39 @@ async fn main() -> Result<()> {
             Err(err)
         }
     }
+}
+
+fn read_result_argument(arg: &str) -> Result<serde_json::Value> {
+    let raw = match arg.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading the result from {path}"))?,
+        None => arg.to_owned(),
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(raw.trim()).context("the result is not valid JSON")?;
+    if !value.is_object() {
+        bail!(
+            "the result must be a JSON object, so whatever reads it next can find its fields by name"
+        );
+    }
+    Ok(value)
+}
+
+async fn run_result_subcommand(args: &[String]) -> Result<()> {
+    let arg = args
+        .get(2)
+        .context("usage: ferrfleet-runner result '<json>' | @<file>")?;
+    let result = read_result_argument(arg)?;
+
+    let env = Env::from_env().context("loading environment")?;
+    let sender = EventSender::new(env);
+    sender
+        .report_result(&result)
+        .await
+        .context("reporting the run result")?;
+
+    info!("result recorded");
+    Ok(())
 }
 
 /// `ferrfleet-runner resolve-thread <thread_id>`.
@@ -254,7 +288,10 @@ you may write there and in /tmp, nowhere else. When a repository is checked \
 out, `git push` is already authenticated: push with plain `git push -u origin \
 HEAD`, never with a token in the remote URL, and never with --force. \
 `ferrfleet-runner pull-request <url>` records the pull request you opened, \
-and `ferrfleet-runner resolve-thread <thread_id>` resolves one review thread."
+`ferrfleet-runner resolve-thread <thread_id>` resolves one review thread, and \
+`ferrfleet-runner result '<json>'` records what you concluded, as a JSON \
+object, for whatever reads this run next. Record one when the task has an \
+answer worth acting on."
     )
 }
 
@@ -460,6 +497,57 @@ fn apply_working_dir_override(cfg: &mut RunConfig, working_dir: Option<&str>) ->
         .with_context(|| format!("creation du repertoire de travail {dir}"))?;
     dir.clone_into(&mut cfg.working_dir);
     Ok(())
+}
+
+#[cfg(test)]
+mod result_argument_tests {
+    use super::*;
+
+    #[test]
+    fn an_inline_object_is_read() {
+        let value =
+            read_result_argument(r#"{"verdict":"changes_requested","findings":2}"#).unwrap();
+        assert_eq!(value["verdict"], "changes_requested");
+        assert_eq!(value["findings"], 2);
+    }
+
+    #[test]
+    fn anything_that_is_not_an_object_is_refused() {
+        for arg in [r#""done""#, "[1,2]", "42", "null"] {
+            assert!(
+                read_result_argument(arg).is_err(),
+                "{arg} would leave the next reader with no field to look up"
+            );
+        }
+    }
+
+    #[test]
+    fn broken_json_is_refused_before_anything_is_sent() {
+        assert!(read_result_argument("{not json").is_err());
+    }
+
+    #[test]
+    fn a_file_argument_is_read_from_disk() {
+        let path =
+            std::env::temp_dir().join(format!("ferrfleet-result-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            "  {\"summary\": \"ok\"}
+",
+        )
+        .expect("writing the fixture");
+
+        let value = read_result_argument(&format!("@{}", path.display())).unwrap();
+
+        assert_eq!(value["summary"], "ok");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_missing_file_says_which_one() {
+        let err = read_result_argument("@/nope/missing.json").unwrap_err();
+        assert!(format!("{err}").contains("missing.json"));
+    }
 }
 
 #[cfg(test)]
