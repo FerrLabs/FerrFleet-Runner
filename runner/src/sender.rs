@@ -81,6 +81,20 @@ impl EventSender {
         Ok(())
     }
 
+    pub async fn report_result(&self, result: &serde_json::Value) -> Result<()> {
+        let endpoint = format!("{}/runs/{}/result", self.env.api_url, self.env.run_id);
+        self.client
+            .post(&endpoint)
+            .bearer_auth(&self.env.run_token)
+            .json(&serde_json::json!({ "result": result }))
+            .send()
+            .await
+            .with_context(|| format!("POST {endpoint}"))?
+            .error_for_status()
+            .with_context(|| format!("non-2xx from {endpoint}"))?;
+        Ok(())
+    }
+
     pub async fn send(&self, event: ExecutorEvent) {
         let url = format!("{}/runs/{}/events", self.env.api_url, self.env.run_id);
         let result = self
