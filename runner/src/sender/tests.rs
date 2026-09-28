@@ -30,17 +30,15 @@ fn reqwest_error(err: &anyhow::Error) -> &reqwest::Error {
 }
 
 #[tokio::test]
-async fn a_502_or_503_is_retried_until_the_api_answers() {
-    for status in [502, 503] {
-        let api = FakeApi::start(move |n| Reply::status(if n < 3 { status } else { 202 })).await;
+async fn a_503_is_retried_until_the_api_answers() {
+    let api = FakeApi::start(|n| Reply::status(if n < 3 { 503 } else { 202 })).await;
 
-        sender(&api.url)
-            .send(&event())
-            .await
-            .unwrap_or_else(|err| panic!("{status} then 202 should deliver: {err:#}"));
+    sender(&api.url)
+        .send(&event())
+        .await
+        .unwrap_or_else(|err| panic!("503 then 202 should deliver: {err:#}"));
 
-        assert_eq!(api.received().len(), 4, "{status} was not retried");
-    }
+    assert_eq!(api.received().len(), 4, "503 was not retried");
 }
 
 #[tokio::test]
@@ -60,7 +58,7 @@ async fn a_refused_connection_is_retried_until_the_api_listens() {
 
 #[tokio::test]
 async fn ambiguous_failures_and_client_errors_are_sent_once() {
-    for status in [400, 401, 404, 422, 500, 504] {
+    for status in [400, 401, 404, 422, 500, 502, 504] {
         let api = FakeApi::start(move |_| Reply::status(status)).await;
 
         let err = sender(&api.url)

@@ -48,10 +48,7 @@ where
 
 fn surely_unprocessed(outcome: &reqwest::Result<Response>) -> bool {
     match outcome {
-        Ok(resp) => matches!(
-            resp.status(),
-            StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE
-        ),
+        Ok(resp) => resp.status() == StatusCode::SERVICE_UNAVAILABLE,
         Err(err) => err.is_connect(),
     }
 }
