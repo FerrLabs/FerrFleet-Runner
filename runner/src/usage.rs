@@ -175,7 +175,7 @@ mod tests {
     fn a_step_without_an_id_is_left_to_the_result() {
         let mut ledger = UsageLedger::default();
         let now = Utc::now();
-        let anonymous = json!({"type": "message", "usage": {"input_tokens": 100}});
+        let anonymous = json!({"type": "assistant", "message": {"usage": {"input_tokens": 100}}});
 
         assert!(ledger.on_assistant(&anonymous, now).is_none());
         assert!(ledger.on_assistant(&anonymous, now).is_none());
