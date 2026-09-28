@@ -82,13 +82,10 @@ pub struct UsageLedger {
 
 impl UsageLedger {
     pub fn on_assistant(&mut self, line: &Value, now: DateTime<Utc>) -> Option<ExecutorEvent> {
-        let message = line.get("message");
-        let usage = message
-            .and_then(|m| m.get("usage"))
-            .or_else(|| line.get("usage"))?;
-        if let Some(id) = message.and_then(|m| m.get("id")).and_then(Value::as_str)
-            && !self.counted_messages.insert(id.to_owned())
-        {
+        let message = line.get("message")?;
+        let usage = message.get("usage")?;
+        let id = message.get("id").and_then(Value::as_str)?;
+        if !self.counted_messages.insert(id.to_owned()) {
             return None;
         }
         let step = Tokens {
@@ -172,6 +169,20 @@ mod tests {
             "a tool_use block repeats the text block's usage"
         );
         assert!(third.is_none());
+    }
+
+    #[test]
+    fn a_step_without_an_id_is_left_to_the_result() {
+        let mut ledger = UsageLedger::default();
+        let now = Utc::now();
+        let anonymous = json!({"type": "assistant", "message": {"usage": {"input_tokens": 100}}});
+
+        assert!(ledger.on_assistant(&anonymous, now).is_none());
+        assert!(ledger.on_assistant(&anonymous, now).is_none());
+        assert_eq!(
+            tokens(ledger.on_result(&json!({"usage": {"input_tokens": 100}}), now)),
+            (100, 0, 0, 0)
+        );
     }
 
     #[test]
