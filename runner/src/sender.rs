@@ -1,10 +1,14 @@
 use anyhow::{Context, Result};
 use ferrfleet_shared::{ExecutorEvent, RunConfig};
+use reqwest::{RequestBuilder, Response};
 use serde::Deserialize;
 use std::time::Duration;
-use tracing::warn;
 
 use crate::config::Env;
+use crate::retry::{self, Backoff};
+
+#[cfg(test)]
+mod tests;
 
 /// Reponse de `GET /runs/{id}/github-token`.
 #[derive(Debug, Deserialize)]
@@ -16,6 +20,7 @@ struct GithubTokenResponse {
 pub struct EventSender {
     env: Env,
     client: reqwest::Client,
+    backoff: Backoff,
 }
 
 impl EventSender {
@@ -24,16 +29,43 @@ impl EventSender {
             .timeout(Duration::from_secs(10))
             .build()
             .expect("building reqwest client");
-        Self { env, client }
+        Self {
+            env,
+            client,
+            backoff: Backoff::API_REDEPLOY,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn for_tests(api_url: &str, backoff: Backoff, timeout: Duration) -> Self {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        Self {
+            env: Env {
+                api_url: api_url.to_owned(),
+                run_id: crate::fake_api::RUN_ID.to_owned(),
+                run_token: "run-token".to_owned(),
+                working_dir: None,
+            },
+            client: reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .expect("building reqwest client"),
+            backoff,
+        }
+    }
+
+    pub fn retry_budget(&self) -> Duration {
+        self.backoff.budget
+    }
+
+    async fn execute(&self, request: impl Fn() -> RequestBuilder) -> reqwest::Result<Response> {
+        retry::while_unprocessed(self.backoff, || request().send()).await
     }
 
     pub async fn fetch_config(&self) -> Result<RunConfig> {
         let url = format!("{}/runs/{}/config", self.env.api_url, self.env.run_id);
         let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.env.run_token)
-            .send()
+            .execute(|| self.client.get(&url).bearer_auth(&self.env.run_token))
             .await
             .with_context(|| format!("GET {url}"))?
             .error_for_status()
@@ -48,10 +80,7 @@ impl EventSender {
     pub async fn fetch_github_token(&self) -> Result<String> {
         let url = format!("{}/runs/{}/github-token", self.env.api_url, self.env.run_id);
         let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.env.run_token)
-            .send()
+            .execute(|| self.client.get(&url).bearer_auth(&self.env.run_token))
             .await
             .with_context(|| format!("GET {url}"))?
             .error_for_status()
@@ -69,45 +98,48 @@ impl EventSender {
     /// PR de l'agent.
     pub async fn report_pull_request(&self, url: &str) -> Result<()> {
         let endpoint = format!("{}/runs/{}/pull-request", self.env.api_url, self.env.run_id);
-        self.client
-            .post(&endpoint)
-            .bearer_auth(&self.env.run_token)
-            .json(&serde_json::json!({ "url": url }))
-            .send()
-            .await
-            .with_context(|| format!("POST {endpoint}"))?
-            .error_for_status()
-            .with_context(|| format!("non-2xx from {endpoint}"))?;
+        let body = serde_json::json!({ "url": url });
+        self.execute(|| {
+            self.client
+                .post(&endpoint)
+                .bearer_auth(&self.env.run_token)
+                .json(&body)
+        })
+        .await
+        .with_context(|| format!("POST {endpoint}"))?
+        .error_for_status()
+        .with_context(|| format!("non-2xx from {endpoint}"))?;
         Ok(())
     }
 
     pub async fn report_result(&self, result: &serde_json::Value) -> Result<()> {
         let endpoint = format!("{}/runs/{}/result", self.env.api_url, self.env.run_id);
-        self.client
-            .post(&endpoint)
-            .bearer_auth(&self.env.run_token)
-            .json(&serde_json::json!({ "result": result }))
-            .send()
-            .await
-            .with_context(|| format!("POST {endpoint}"))?
-            .error_for_status()
-            .with_context(|| format!("non-2xx from {endpoint}"))?;
+        let body = serde_json::json!({ "result": result });
+        self.execute(|| {
+            self.client
+                .post(&endpoint)
+                .bearer_auth(&self.env.run_token)
+                .json(&body)
+        })
+        .await
+        .with_context(|| format!("POST {endpoint}"))?
+        .error_for_status()
+        .with_context(|| format!("non-2xx from {endpoint}"))?;
         Ok(())
     }
 
-    pub async fn send(&self, event: ExecutorEvent) {
+    pub async fn send(&self, event: &ExecutorEvent) -> Result<()> {
         let url = format!("{}/runs/{}/events", self.env.api_url, self.env.run_id);
-        let result = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.env.run_token)
-            .json(&event)
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status);
-        if let Err(err) = result {
-            warn!(?err, "failed to push event to api (continuing)");
-        }
+        self.execute(|| {
+            self.client
+                .post(&url)
+                .bearer_auth(&self.env.run_token)
+                .json(event)
+        })
+        .await
+        .and_then(Response::error_for_status)
+        .with_context(|| format!("POST {url}"))?;
+        Ok(())
     }
 }
 
@@ -135,12 +167,14 @@ impl EventSender {
     /// degrades to the hostname, which is still better than nothing.
     pub async fn claim_run(&self) -> Result<Claim> {
         let url = format!("{}/runs/{}/claim", self.env.api_url, self.env.run_id);
+        let body = serde_json::json!({ "runner": claimant() });
         let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.env.run_token)
-            .json(&serde_json::json!({ "runner": claimant() }))
-            .send()
+            .execute(|| {
+                self.client
+                    .post(&url)
+                    .bearer_auth(&self.env.run_token)
+                    .json(&body)
+            })
             .await
             .with_context(|| format!("POST {url}"))?;
 
