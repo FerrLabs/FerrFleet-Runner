@@ -327,6 +327,7 @@ mod tests {
         let line = r#"{
             "type":"assistant",
             "message":{
+                "id":"msg_1",
                 "content":[{"type":"text","text":"Hello"}],
                 "usage":{"input_tokens":10,"output_tokens":5}
             }
