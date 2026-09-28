@@ -10,6 +10,10 @@ use tracing::{error, info, warn};
 
 mod claude_stream;
 mod config;
+mod event_queue;
+#[cfg(test)]
+mod fake_api;
+mod retry;
 mod review_threads;
 mod sender;
 mod usage;
@@ -17,6 +21,7 @@ mod workspace;
 
 use claude_stream::{reopens_current_session, translate};
 use config::Env;
+use event_queue::EventQueue;
 use sender::EventSender;
 
 #[tokio::main]
@@ -40,31 +45,28 @@ async fn main() -> Result<()> {
     info!(run_id = %env.run_id, "starting runner");
 
     let sender = EventSender::new(env.clone());
+    let queue = EventQueue::start(sender.clone());
 
-    match run(&env, &sender).await {
-        Ok(()) => {
-            info!(run_id = %env.run_id, "runner exited cleanly");
-            Ok(())
-        }
-        Err(err) => {
-            error!(?err, "runner failed");
-            sender
-                .send(ExecutorEvent::Error {
-                    message: err.to_string(),
-                    provider_signal: false,
-                    timestamp: Utc::now(),
-                })
-                .await;
-            sender
-                .send(ExecutorEvent::Completed {
-                    exit_code: 1,
-                    session_id: None,
-                    timestamp: Utc::now(),
-                })
-                .await;
-            Err(err)
-        }
+    let outcome = run(&env, &sender, &queue).await;
+    if let Err(err) = &outcome {
+        error!(?err, "runner failed");
+        queue.push(ExecutorEvent::Error {
+            message: err.to_string(),
+            provider_signal: false,
+            timestamp: Utc::now(),
+        });
+        queue.push(ExecutorEvent::Completed {
+            exit_code: 1,
+            session_id: None,
+            timestamp: Utc::now(),
+        });
     }
+    queue.flush().await;
+
+    if outcome.is_ok() {
+        info!(run_id = %env.run_id, "runner exited cleanly");
+    }
+    outcome
 }
 
 fn read_result_argument(arg: &str) -> Result<serde_json::Value> {
@@ -151,7 +153,7 @@ async fn run_pull_request_subcommand(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn run(env: &Env, sender: &EventSender) -> Result<()> {
+async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<()> {
     let mut cfg = sender.fetch_config().await?;
     if cfg.run_id.to_string() != env.run_id {
         bail!(
@@ -197,7 +199,7 @@ async fn run(env: &Env, sender: &EventSender) -> Result<()> {
 
     let exit_code = match spawn_and_stream(
         &cfg,
-        sender,
+        queue,
         &mut totals,
         &mut session_id,
         git_credentials.as_ref(),
@@ -207,13 +209,11 @@ async fn run(env: &Env, sender: &EventSender) -> Result<()> {
         Ok(code) => code,
         Err(err) => {
             warn!(?err, "claude execution failed");
-            sender
-                .send(ExecutorEvent::Error {
-                    message: format!("claude execution failed: {err}"),
-                    provider_signal: false,
-                    timestamp: Utc::now(),
-                })
-                .await;
+            queue.push(ExecutorEvent::Error {
+                message: format!("claude execution failed: {err}"),
+                provider_signal: false,
+                timestamp: Utc::now(),
+            });
             -1
         }
     };
@@ -251,27 +251,23 @@ async fn run(env: &Env, sender: &EventSender) -> Result<()> {
             duration_ms,
             "claude exited cleanly without starting a session or spending tokens — reporting as failed"
         );
-        sender
-            .send(ExecutorEvent::Error {
-                message: "claude exited 0 without starting a session or spending any tokens; \
-                          the run produced no output (check credentials and MCP servers)"
-                    .to_owned(),
-                provider_signal: false,
-                timestamp: Utc::now(),
-            })
-            .await;
+        queue.push(ExecutorEvent::Error {
+            message: "claude exited 0 without starting a session or spending any tokens; \
+                      the run produced no output (check credentials and MCP servers)"
+                .to_owned(),
+            provider_signal: false,
+            timestamp: Utc::now(),
+        });
         1
     } else {
         exit_code
     };
 
-    sender
-        .send(ExecutorEvent::Completed {
-            exit_code,
-            session_id,
-            timestamp: Utc::now(),
-        })
-        .await;
+    queue.push(ExecutorEvent::Completed {
+        exit_code,
+        session_id,
+        timestamp: Utc::now(),
+    });
     Ok(())
 }
 
@@ -899,7 +895,7 @@ fn build_claude_command(
 
 async fn spawn_and_stream(
     cfg: &RunConfig,
-    sender: &EventSender,
+    queue: &EventQueue,
     totals: &mut TokenTotals,
     session_id: &mut Option<String>,
     git_credentials: Option<&workspace::GitCredentials>,
@@ -955,7 +951,7 @@ async fn spawn_and_stream(
                         {
                             *session_id = Some(sid.clone());
                         }
-                        sender.send(ev).await;
+                        queue.push(ev);
                     }
                 }
                 Err(err) => {
