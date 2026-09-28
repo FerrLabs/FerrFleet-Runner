@@ -12,6 +12,7 @@ mod claude_stream;
 mod config;
 mod review_threads;
 mod sender;
+mod usage;
 mod workspace;
 
 use claude_stream::{reopens_current_session, translate};
@@ -919,13 +920,14 @@ async fn spawn_and_stream(
         }
     });
 
+    let mut usage = usage::UsageLedger::default();
     let timeout = Duration::from_secs(cfg.timeout_seconds);
     let result = tokio::time::timeout(timeout, async {
         while let Some(line) = reader.next_line().await? {
             if line.trim().is_empty() {
                 continue;
             }
-            match translate(&line) {
+            match translate(&line, &mut usage) {
                 Ok(events) => {
                     for ev in events {
                         if let ExecutorEvent::Usage {
