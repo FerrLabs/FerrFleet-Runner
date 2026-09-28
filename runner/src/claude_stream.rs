@@ -3,7 +3,9 @@ use chrono::Utc;
 use ferrfleet_shared::ExecutorEvent;
 use serde_json::Value;
 
-pub fn translate(line: &str) -> Result<Vec<ExecutorEvent>> {
+use crate::usage::UsageLedger;
+
+pub fn translate(line: &str, usage: &mut UsageLedger) -> Result<Vec<ExecutorEvent>> {
     let value: Value = serde_json::from_str(line).context("parsing claude json line")?;
     let now = Utc::now();
     let mut out = Vec::new();
@@ -42,13 +44,7 @@ pub fn translate(line: &str) -> Result<Vec<ExecutorEvent>> {
                 }
                 return Ok(out);
             }
-            let usage_value = value
-                .get("message")
-                .and_then(|m| m.get("usage"))
-                .or_else(|| value.get("usage"));
-            if let Some(usage) = usage_value
-                && let Some(ev) = usage_event(usage, now)
-            {
+            if let Some(ev) = usage.on_assistant(&value, now) {
                 out.push(ev);
             }
             if let Some(content) = value.get("message").and_then(|m| m.get("content")) {
@@ -61,9 +57,7 @@ pub fn translate(line: &str) -> Result<Vec<ExecutorEvent>> {
             }
         }
         "result" => {
-            if let Some(usage) = value.get("usage")
-                && let Some(ev) = usage_event(usage, now)
-            {
+            if let Some(ev) = usage.on_result(&value, now) {
                 out.push(ev);
             }
             // The CLI's own verdict on whether the underlying API call
@@ -253,31 +247,6 @@ fn is_provider_failure(subtype: &str, detail: &str) -> bool {
         || lowered.contains(" 529")
 }
 
-fn usage_event(usage: &Value, now: chrono::DateTime<Utc>) -> Option<ExecutorEvent> {
-    let input = u32_field(usage, "input_tokens");
-    let output = u32_field(usage, "output_tokens");
-    let cache_creation = u32_field(usage, "cache_creation_input_tokens");
-    let cache_read = u32_field(usage, "cache_read_input_tokens");
-    if input == 0 && output == 0 && cache_creation == 0 && cache_read == 0 {
-        return None;
-    }
-    Some(ExecutorEvent::Usage {
-        input_tokens: input,
-        output_tokens: output,
-        cache_creation_input_tokens: cache_creation,
-        cache_read_input_tokens: cache_read,
-        timestamp: now,
-    })
-}
-
-fn u32_field(value: &Value, key: &str) -> u32 {
-    value
-        .get(key)
-        .and_then(Value::as_u64)
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(0)
-}
-
 /// Whether this event re-announces the session that is already open.
 ///
 /// Restricting `SessionStarted` to `system/init` removed the bulk of the
@@ -303,7 +272,7 @@ mod tests {
     #[test]
     fn translates_system_session_id() {
         let line = r#"{"type":"system","session_id":"abc-123","subtype":"init"}"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ExecutorEvent::SessionStarted { session_id, .. } => {
@@ -316,14 +285,18 @@ mod tests {
     #[test]
     fn a_repeated_init_does_not_reopen_the_session() {
         let line = r#"{"type":"system","subtype":"init","session_id":"abc-123"}"#;
-        let event = translate(line).unwrap().remove(0);
+        let event = translate(line, &mut UsageLedger::default())
+            .unwrap()
+            .remove(0);
         assert!(reopens_current_session(&event, Some("abc-123")));
     }
 
     #[test]
     fn the_first_init_opens_the_session() {
         let line = r#"{"type":"system","subtype":"init","session_id":"abc-123"}"#;
-        let event = translate(line).unwrap().remove(0);
+        let event = translate(line, &mut UsageLedger::default())
+            .unwrap()
+            .remove(0);
         assert!(!reopens_current_session(&event, None));
     }
 
@@ -333,14 +306,18 @@ mod tests {
     #[test]
     fn a_different_session_id_still_opens_a_session() {
         let line = r#"{"type":"system","subtype":"init","session_id":"def-456"}"#;
-        let event = translate(line).unwrap().remove(0);
+        let event = translate(line, &mut UsageLedger::default())
+            .unwrap()
+            .remove(0);
         assert!(!reopens_current_session(&event, Some("abc-123")));
     }
 
     #[test]
     fn other_events_are_never_treated_as_session_starts() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
-        let event = translate(line).unwrap().remove(0);
+        let event = translate(line, &mut UsageLedger::default())
+            .unwrap()
+            .remove(0);
         assert!(!reopens_current_session(&event, Some("abc-123")));
         assert!(!reopens_current_session(&event, None));
     }
@@ -354,13 +331,13 @@ mod tests {
                 "usage":{"input_tokens":10,"output_tokens":5}
             }
         }"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         assert_eq!(events.len(), 2);
         assert!(matches!(
             events[0],
             ExecutorEvent::Usage {
                 input_tokens: 10,
-                output_tokens: 5,
+                output_tokens: 0,
                 ..
             }
         ));
@@ -380,7 +357,7 @@ mod tests {
                 "input":{"file_path":"/etc/hosts"}
             }]}
         }"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ExecutorEvent::ToolUse {
@@ -408,7 +385,7 @@ mod tests {
                 "is_error":false
             }]}
         }"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ExecutorEvent::ToolResult {
@@ -426,7 +403,7 @@ mod tests {
     #[test]
     fn ignores_unknown_kind() {
         let line = r#"{"type":"weird","foo":1}"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         assert!(events.is_empty());
     }
 
@@ -442,7 +419,7 @@ mod tests {
             "result":"upstream API error: rate_limit_error, status 429",
             "usage":{"input_tokens":10,"output_tokens":0}
         }"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         let error = events
             .iter()
             .find(|e| matches!(e, ExecutorEvent::Error { .. }))
@@ -472,7 +449,7 @@ mod tests {
             "result":"rate_limit_error mentioned incidentally, status 429 too",
             "usage":{"input_tokens":10,"output_tokens":5}
         }"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         let error = events
             .iter()
             .find(|e| matches!(e, ExecutorEvent::Error { .. }))
@@ -500,7 +477,7 @@ mod tests {
             "is_error":true,
             "result":"the tool call raised an unexpected exception"
         }"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         let error = events
             .iter()
             .find(|e| matches!(e, ExecutorEvent::Error { .. }))
@@ -524,7 +501,7 @@ mod tests {
             "is_error":false,
             "usage":{"input_tokens":10,"output_tokens":5}
         }"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         assert!(
             !events
                 .iter()
@@ -538,7 +515,7 @@ mod tests {
         // version ran unless this is captured here.
         let line =
             r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-sonnet-5"}"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         match &events[0] {
             ExecutorEvent::SessionStarted { model, .. } => {
                 assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
@@ -552,7 +529,11 @@ mod tests {
         // Every system event carries the same session_id. Emitting one
         // SessionStarted each produced ~36 per run — 46% of the transcript.
         let line = r#"{"type":"system","subtype":"compact_boundary","session_id":"s1"}"#;
-        assert!(translate(line).unwrap().is_empty());
+        assert!(
+            translate(line, &mut UsageLedger::default())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -568,7 +549,7 @@ mod tests {
                 "is_error":false
             }]}
         }"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ExecutorEvent::ToolResult { output, .. } => {
@@ -603,12 +584,44 @@ mod tests {
                 "is_error":false
             }]}
         }"#;
-        let events = translate(line).unwrap();
+        let events = translate(line, &mut UsageLedger::default()).unwrap();
         match &events[0] {
             ExecutorEvent::ToolResult { output, .. } => {
                 assert!(output.to_string().contains("127.0.0.1 localhost"));
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn a_whole_stream_reports_the_result_total_and_nothing_more() {
+        let stream = [
+            r#"{"type":"system","subtype":"init","session_id":"s1"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"Reading."}],"usage":{"input_tokens":120,"output_tokens":2,"cache_read_input_tokens":3000}}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}],"usage":{"input_tokens":120,"output_tokens":2,"cache_read_input_tokens":3000}}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_2","content":[{"type":"text","text":"Done."}],"usage":{"input_tokens":40,"output_tokens":2,"cache_read_input_tokens":3100}}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":160,"output_tokens":350,"cache_read_input_tokens":6100}}"#,
+        ];
+        let mut ledger = UsageLedger::default();
+        let mut total = (0, 0, 0);
+
+        for line in stream {
+            for event in translate(line, &mut ledger).unwrap() {
+                if let ExecutorEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_input_tokens,
+                    ..
+                } = event
+                {
+                    total.0 += input_tokens;
+                    total.1 += output_tokens;
+                    total.2 += cache_read_input_tokens;
+                }
+            }
+        }
+
+        assert_eq!(total, (160, 350, 6100));
     }
 }
