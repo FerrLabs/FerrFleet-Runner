@@ -62,10 +62,11 @@ impl Reply {
 pub struct Received {
     pub method: String,
     pub path: String,
+    pub authorization: Option<String>,
     pub body: String,
 }
 
-type Script = Arc<dyn Fn(usize) -> Reply + Send + Sync>;
+type Script = Arc<dyn Fn(&Received, usize) -> Reply + Send + Sync>;
 
 pub struct FakeApi {
     pub url: String,
@@ -74,6 +75,12 @@ pub struct FakeApi {
 
 impl FakeApi {
     pub async fn start(script: impl Fn(usize) -> Reply + Send + Sync + 'static) -> Self {
+        Self::routed(move |_, n| script(n)).await
+    }
+
+    pub async fn routed(
+        script: impl Fn(&Received, usize) -> Reply + Send + Sync + 'static,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("binding the fake api");
@@ -95,7 +102,12 @@ impl FakeApi {
             let listener = TcpListener::bind(("127.0.0.1", port))
                 .await
                 .expect("binding the fake api on its reserved port");
-            serve(listener, Arc::new(script), received).await;
+            serve(
+                listener,
+                Arc::new(move |_: &Received, n| script(n)),
+                received,
+            )
+            .await;
         });
         api
     }
@@ -126,10 +138,10 @@ async fn answer(
     let request = read_request(&mut socket).await?;
     let index = {
         let mut received = received.lock().expect("received lock");
-        received.push(request);
+        received.push(request.clone());
         received.len() - 1
     };
-    let reply = script(index);
+    let reply = script(&request, index);
     tokio::time::sleep(reply.delay).await;
     let head = format!(
         "HTTP/1.1 {} Scripted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -155,11 +167,8 @@ async fn read_request(socket: &mut TcpStream) -> std::io::Result<Received> {
         buf.extend_from_slice(&chunk[..read]);
     };
     let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
-    let length = head
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+    let length = header(&head, "content-length")
+        .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
     while buf.len() < head_end + length {
         let read = socket.read(&mut chunk).await?;
@@ -172,6 +181,14 @@ async fn read_request(socket: &mut TcpStream) -> std::io::Result<Received> {
     Ok(Received {
         method: request_line.next().unwrap_or_default().to_owned(),
         path: request_line.next().unwrap_or_default().to_owned(),
+        authorization: header(&head, "authorization"),
         body: String::from_utf8_lossy(&buf[head_end..head_end + length]).into_owned(),
     })
+}
+
+fn header(head: &str, wanted: &str) -> Option<String> {
+    head.lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+        .map(|(_, value)| value.trim().to_owned())
 }

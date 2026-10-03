@@ -2,17 +2,20 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use ferrfleet_shared::{ExecutorEvent, RunConfig, pricing};
 use std::fmt::Write as _;
+use std::future::Future;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tracing::{error, info, warn};
 
+mod agent;
 mod claude_stream;
 mod config;
 mod event_queue;
 #[cfg(test)]
 mod fake_api;
+mod lease;
 mod retry;
 mod review_threads;
 mod sender;
@@ -22,6 +25,7 @@ mod workspace;
 use claude_stream::{reopens_current_session, translate};
 use config::Env;
 use event_queue::EventQueue;
+use lease::Lost;
 use sender::EventSender;
 
 #[tokio::main]
@@ -38,6 +42,7 @@ async fn main() -> Result<()> {
         Some("resolve-thread") => return run_resolve_thread_subcommand(&args).await,
         Some("pull-request") => return run_pull_request_subcommand(&args).await,
         Some("result") => return run_result_subcommand(&args).await,
+        Some("agent") => return agent::run_subcommand(&args[2..]).await,
         _ => {}
     }
 
@@ -45,27 +50,48 @@ async fn main() -> Result<()> {
     info!(run_id = %env.run_id, "starting runner");
 
     let sender = EventSender::new(env.clone());
+    supervise(&env, &sender).await?;
+    info!(run_id = %env.run_id, "runner exited cleanly");
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Completed { exit_code: i32 },
+    TakenElsewhere,
+    Stopped(Lost),
+}
+
+enum Streamed {
+    Exited(i32),
+    Stopped(Lost),
+}
+
+async fn supervise(env: &Env, sender: &EventSender) -> Result<RunOutcome> {
     let queue = EventQueue::start(sender.clone());
 
-    let outcome = run(&env, &sender, &queue).await;
-    if let Err(err) = &outcome {
-        error!(?err, "runner failed");
-        queue.push(ExecutorEvent::Error {
-            message: err.to_string(),
-            provider_signal: false,
-            timestamp: Utc::now(),
-        });
-        queue.push(ExecutorEvent::Completed {
-            exit_code: 1,
-            session_id: None,
-            timestamp: Utc::now(),
-        });
-    }
+    let outcome = match (run(env, sender, &queue).await, sender.lost()) {
+        (_, Some(lost)) => {
+            info!(run_id = %env.run_id, %lost, "run stopped; nothing more is reported");
+            Ok(RunOutcome::Stopped(lost))
+        }
+        (Ok(outcome), None) => Ok(outcome),
+        (Err(err), None) => {
+            error!(?err, "runner failed");
+            queue.push(ExecutorEvent::Error {
+                message: err.to_string(),
+                provider_signal: false,
+                timestamp: Utc::now(),
+            });
+            queue.push(ExecutorEvent::Completed {
+                exit_code: 1,
+                session_id: None,
+                timestamp: Utc::now(),
+            });
+            Err(err)
+        }
+    };
     queue.flush().await;
-
-    if outcome.is_ok() {
-        info!(run_id = %env.run_id, "runner exited cleanly");
-    }
     outcome
 }
 
@@ -153,7 +179,7 @@ async fn run_pull_request_subcommand(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<()> {
+async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<RunOutcome> {
     let mut cfg = sender.fetch_config().await?;
     if cfg.run_id.to_string() != env.run_id {
         bail!(
@@ -172,7 +198,7 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<()> 
             sender::Claim::Granted => info!(run_id = %cfg.run_id, "run claimed"),
             sender::Claim::AlreadyTaken => {
                 info!(run_id = %cfg.run_id, "run already claimed by another runner; nothing to do");
-                return Ok(());
+                return Ok(RunOutcome::TakenElsewhere);
             }
         }
     }
@@ -185,7 +211,7 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<()> 
     // quand cette variable sort de portee, a la fin du run.
     let git_credentials = if let Some(checkout) = cfg.checkout.as_ref() {
         Some(
-            workspace::prepare(checkout, std::path::Path::new(&cfg.working_dir))
+            workspace::prepare(checkout, std::path::Path::new(&cfg.working_dir), env)
                 .await
                 .context("preparation du depot de travail")?,
         )
@@ -199,14 +225,17 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<()> 
 
     let exit_code = match spawn_and_stream(
         &cfg,
+        env,
         queue,
         &mut totals,
         &mut session_id,
         git_credentials.as_ref(),
+        sender.wait_lost(),
     )
     .await
     {
-        Ok(code) => code,
+        Ok(Streamed::Exited(code)) => code,
+        Ok(Streamed::Stopped(lost)) => return Ok(RunOutcome::Stopped(lost)),
         Err(err) => {
             warn!(?err, "claude execution failed");
             queue.push(ExecutorEvent::Error {
@@ -268,7 +297,7 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<()> 
         session_id,
         timestamp: Utc::now(),
     });
-    Ok(())
+    Ok(RunOutcome::Completed { exit_code })
 }
 
 /// Appended to every run's system prompt, so an agent does not spend a turn
@@ -816,6 +845,7 @@ mod repo_context_tests {
 /// d'authentification git et configuration MCP.
 fn build_claude_command(
     cfg: &RunConfig,
+    env: &Env,
     git_credentials: Option<&workspace::GitCredentials>,
 ) -> Result<Command> {
     let mut cmd = Command::new("claude");
@@ -836,6 +866,7 @@ fn build_claude_command(
         .stderr(Stdio::piped());
 
     load_claude_credentials(&mut cmd);
+    env.apply_to(&mut cmd);
 
     // Le push est fait par l'agent: `GIT_ASKPASS` va donc dans l'environnement
     // de CE sous-processus, pour que `git push` lance par l'agent
@@ -895,14 +926,27 @@ fn build_claude_command(
 
 async fn spawn_and_stream(
     cfg: &RunConfig,
+    env: &Env,
     queue: &EventQueue,
     totals: &mut TokenTotals,
     session_id: &mut Option<String>,
     git_credentials: Option<&workspace::GitCredentials>,
-) -> Result<i32> {
-    let mut cmd = build_claude_command(cfg, git_credentials)?;
+    stop: impl Future<Output = Lost>,
+) -> Result<Streamed> {
+    let mut cmd = build_claude_command(cfg, env, git_credentials)?;
+    let child = cmd.spawn().context("spawning claude CLI")?;
+    let timeout = Duration::from_secs(cfg.timeout_seconds);
+    stream_child(child, queue, totals, session_id, timeout, stop).await
+}
 
-    let mut child = cmd.spawn().context("spawning claude CLI")?;
+async fn stream_child(
+    mut child: Child,
+    queue: &EventQueue,
+    totals: &mut TokenTotals,
+    session_id: &mut Option<String>,
+    timeout: Duration,
+    stop: impl Future<Output = Lost>,
+) -> Result<Streamed> {
     let stdout = child.stdout.take().context("claude stdout missing")?;
     let stderr = child.stderr.take().context("claude stderr missing")?;
     let mut reader = BufReader::new(stdout).lines();
@@ -917,8 +961,7 @@ async fn spawn_and_stream(
     });
 
     let mut usage = usage::UsageLedger::default();
-    let timeout = Duration::from_secs(cfg.timeout_seconds);
-    let result = tokio::time::timeout(timeout, async {
+    let streaming = tokio::time::timeout(timeout, async {
         while let Some(line) = reader.next_line().await? {
             if line.trim().is_empty() {
                 continue;
@@ -960,8 +1003,17 @@ async fn spawn_and_stream(
             }
         }
         anyhow::Ok(())
-    })
-    .await;
+    });
+
+    let result = tokio::select! {
+        result = streaming => result,
+        lost = stop => {
+            warn!(%lost, "run stopped by FerrFleet; killing claude");
+            let _ = child.kill().await;
+            stderr_task.abort();
+            return Ok(Streamed::Stopped(lost));
+        }
+    };
 
     let exit_code = match result {
         Ok(Ok(())) => child
@@ -982,7 +1034,48 @@ async fn spawn_and_stream(
     };
 
     let _ = stderr_task.await;
-    Ok(exit_code)
+    Ok(Streamed::Exited(exit_code))
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_lost_lease_kills_claude_instead_of_waiting_for_it() {
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawning a stand-in for claude");
+        let pid = child.id().expect("a running child has a pid");
+        let queue = EventQueue::start(fake_api::sender(&fake_api::dead_api_url()));
+        let mut totals = TokenTotals::default();
+        let mut session_id = None;
+
+        let started = std::time::Instant::now();
+        let streamed = stream_child(
+            child,
+            &queue,
+            &mut totals,
+            &mut session_id,
+            Duration::from_secs(60),
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Lost::RunOver
+            },
+        )
+        .await
+        .expect("a stop is not an error");
+
+        assert!(matches!(streamed, Streamed::Stopped(Lost::RunOver)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "claude kept running after FerrFleet took the run back"
+        );
+    }
 }
 
 #[derive(Default)]
