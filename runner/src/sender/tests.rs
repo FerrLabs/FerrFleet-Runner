@@ -5,6 +5,7 @@ use ferrfleet_shared::ExecutorEvent;
 
 use super::{Claim, EventSender};
 use crate::fake_api::{FAST, FakeApi, RUN_ID, Reply, dead_api_url, sender};
+use crate::lease::{LeaseState, Lost, Stopped};
 use crate::retry::Backoff;
 
 fn event() -> ExecutorEvent {
@@ -153,4 +154,35 @@ async fn a_conflict_behind_a_503_is_still_already_taken() {
             .iter()
             .all(|r| r.method == "POST" && r.path == format!("/runs/{RUN_ID}/claim"))
     );
+}
+
+#[tokio::test]
+async fn once_the_lease_is_lost_nothing_more_reaches_the_api() {
+    let api = FakeApi::start(|_| Reply::status(409)).await;
+    let sender = sender(&api.url).with_lease(LeaseState::default());
+
+    assert!(sender.send(&event()).await.is_err());
+    let err = sender
+        .send(&event())
+        .await
+        .expect_err("a run this runner lost takes no more events");
+
+    assert_eq!(sender.lost(), Some(Lost::Superseded));
+    assert!(err.is::<Stopped>(), "{err:#}");
+    assert_eq!(api.received().len(), 1, "an event went out after the 409");
+}
+
+#[tokio::test]
+async fn without_a_lease_a_conflict_does_not_silence_the_sender() {
+    let api = FakeApi::start(|n| Reply::status(if n == 0 { 409 } else { 202 })).await;
+    let sender = sender(&api.url);
+
+    assert!(sender.send(&event()).await.is_err());
+    sender
+        .send(&event())
+        .await
+        .expect("an external run keeps reporting after a refused event");
+
+    assert_eq!(sender.lost(), None);
+    assert_eq!(api.received().len(), 2);
 }

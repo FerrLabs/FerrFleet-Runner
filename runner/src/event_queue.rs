@@ -3,7 +3,7 @@ use std::time::Duration;
 use ferrfleet_shared::ExecutorEvent;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::sender::EventSender;
 
@@ -19,8 +19,15 @@ impl EventQueue {
         let (tx, mut rx) = mpsc::unbounded_channel::<ExecutorEvent>();
         let drain = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
+                if sender.lost().is_some() {
+                    continue;
+                }
                 if let Err(err) = sender.send(&event).await {
-                    warn!(?err, "failed to push event to api (continuing)");
+                    if let Some(lost) = sender.lost() {
+                        info!(%lost, "run stopped; queued events are dropped");
+                    } else {
+                        warn!(?err, "failed to push event to api (continuing)");
+                    }
                 }
             }
         });
