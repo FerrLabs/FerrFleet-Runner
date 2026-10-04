@@ -247,8 +247,8 @@ mod tests {
         }"#;
         let cfg: RunConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.timeout_seconds, 1800);
-        assert!(cfg.allowed_tools.is_empty());
-        assert!(cfg.disallowed_tools.is_empty());
+        assert_eq!(cfg.allowed_tools, Vec::<String>::new());
+        assert_eq!(cfg.disallowed_tools, Vec::<String>::new());
         assert!(cfg.session_id.is_none());
         // A config written before this field existed must not deserialize into
         // an interactive run — that is the state that hangs unattended.
