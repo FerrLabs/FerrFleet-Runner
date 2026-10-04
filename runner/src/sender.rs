@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 use crate::config::Env;
+use crate::lease::{LeaseState, Lost, Stopped};
 use crate::retry::{self, Backoff};
 
 #[cfg(test)]
@@ -21,45 +22,87 @@ pub struct EventSender {
     env: Env,
     client: reqwest::Client,
     backoff: Backoff,
+    lease: Option<LeaseState>,
 }
 
 impl EventSender {
+    pub const TIMEOUT: Duration = Duration::from_secs(10);
+
     pub fn new(env: Env) -> Self {
+        Self::configured(env, Backoff::API_REDEPLOY, Self::TIMEOUT)
+    }
+
+    pub fn configured(env: Env, backoff: Backoff, timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(timeout)
             .build()
             .expect("building reqwest client");
         Self {
             env,
             client,
-            backoff: Backoff::API_REDEPLOY,
+            backoff,
+            lease: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_lease(self, lease: LeaseState) -> Self {
+        Self {
+            lease: Some(lease),
+            ..self
+        }
+    }
+
+    pub fn lost(&self) -> Option<Lost> {
+        self.lease.as_ref().and_then(LeaseState::lost)
+    }
+
+    pub async fn wait_lost(&self) -> Lost {
+        match &self.lease {
+            Some(lease) => lease.wait().await,
+            None => std::future::pending().await,
         }
     }
 
     #[cfg(test)]
     pub fn for_tests(api_url: &str, backoff: Backoff, timeout: Duration) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        Self {
-            env: Env {
+        Self::configured(
+            Env {
                 api_url: api_url.to_owned(),
                 run_id: crate::fake_api::RUN_ID.to_owned(),
                 run_token: "run-token".to_owned(),
                 working_dir: None,
+                runner_name: None,
             },
-            client: reqwest::Client::builder()
-                .timeout(timeout)
-                .build()
-                .expect("building reqwest client"),
             backoff,
-        }
+            timeout,
+        )
     }
 
     pub fn retry_budget(&self) -> Duration {
         self.backoff.budget
     }
 
-    async fn execute(&self, request: impl Fn() -> RequestBuilder) -> reqwest::Result<Response> {
-        retry::while_unprocessed(self.backoff, || request().send()).await
+    async fn execute(&self, request: impl Fn() -> RequestBuilder) -> Result<Response> {
+        if let Some(lost) = self.lost() {
+            return Err(Stopped(lost).into());
+        }
+        let resp = retry::while_unprocessed(self.backoff, || request().send()).await?;
+        if let Some(lease) = &self.lease {
+            lease.observe(resp.status());
+        }
+        Ok(resp)
+    }
+
+    pub async fn heartbeat(&self) -> Result<()> {
+        let url = format!("{}/runs/{}/heartbeat", self.env.api_url, self.env.run_id);
+        self.execute(|| self.client.post(&url).bearer_auth(&self.env.run_token))
+            .await
+            .with_context(|| format!("POST {url}"))?
+            .error_for_status()
+            .with_context(|| format!("non-2xx from {url}"))?;
+        Ok(())
     }
 
     pub async fn fetch_config(&self) -> Result<RunConfig> {
@@ -137,7 +180,7 @@ impl EventSender {
                 .json(event)
         })
         .await
-        .and_then(Response::error_for_status)
+        .and_then(|resp| resp.error_for_status().map_err(anyhow::Error::from))
         .with_context(|| format!("POST {url}"))?;
         Ok(())
     }
@@ -167,7 +210,8 @@ impl EventSender {
     /// degrades to the hostname, which is still better than nothing.
     pub async fn claim_run(&self) -> Result<Claim> {
         let url = format!("{}/runs/{}/claim", self.env.api_url, self.env.run_id);
-        let body = serde_json::json!({ "runner": claimant() });
+        let runner = self.env.runner_name.clone().unwrap_or_else(claimant);
+        let body = serde_json::json!({ "runner": runner });
         let resp = self
             .execute(|| {
                 self.client
@@ -192,7 +236,7 @@ impl EventSender {
 /// Read from the environment the pipeline already sets rather than from
 /// anything we ask the operator to configure: a claim that needs setup is a
 /// claim someone eventually skips.
-fn claimant() -> String {
+pub(crate) fn claimant() -> String {
     let repo = std::env::var("GITHUB_REPOSITORY").ok();
     let run = std::env::var("GITHUB_RUN_ID").ok();
     match (repo, run) {

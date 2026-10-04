@@ -152,6 +152,77 @@ by the API in one conditional statement, because runners cannot see each other.
 
 You do not have to design around it and you cannot switch it off.
 
+## Taking runs from a pool
+
+The modes above execute a run somebody already created. `ferrfleet-runner agent`
+works the other way round: it is a long-lived process on a machine you host,
+registered to one of your organization's runner pools, that asks FerrFleet for
+the next run of an agent pointed at that pool, executes it, and asks again. Every
+call goes out from the runner, so it works behind a firewall that only allows
+outbound HTTPS. Pools themselves are created in FerrFleet, which hands you the
+pool token once.
+
+| Variable | Required | What |
+| --- | --- | --- |
+| `FERRFLEET_API_URL` | yes | Base URL of the API. |
+| `FERRFLEET_POOL_TOKEN` | yes | The pool's `ffrp_...` token. It only opens the lease route. |
+| `FERRFLEET_RUNNER_NAME` | no | Label shown on the run page. Defaults to the hostname. |
+| `FERRFLEET_WORKING_DIR` | no | Where runs work. Defaults to `ferrfleet-runs` in the temp directory. |
+| `ANTHROPIC_API_KEY` | yes | Yours, read by `claude` from this process's environment. |
+
+```bash
+docker run -d --restart unless-stopped \
+  -e FERRFLEET_API_URL=https://api.ferrfleet.com \
+  -e FERRFLEET_POOL_TOKEN -e FERRFLEET_RUNNER_NAME=build-farm-07 \
+  -e ANTHROPIC_API_KEY \
+  ghcr.io/ferrlabs/ferrfleet/runner:1 agent
+```
+
+Use an Anthropic API key from a workspace you set aside for these runs, so its
+spend and its rate limits are visible on their own. The Claude credential stays
+on your machine: the runner never sends it to FerrFleet, and FerrFleet never asks
+for it.
+
+What happens to each run:
+
+1. The runner long-polls `POST /runner-pools/lease` with the pool token. An empty
+   answer is followed by the next poll at once; a `429`, a `5xx` or an
+   unreachable API by a pause that doubles up to 30 seconds. A `401` means the
+   token is wrong, was rotated or its pool was revoked, and the process exits
+   with an error saying so.
+2. A lease brings a run id and a run token. From there the run goes exactly as an
+   external one: claim, configuration, clone, `claude`, events, result. The pool
+   token is not used again for that run, and is removed from the environment of
+   `claude`, `git` and everything the agent starts.
+3. From the lease until the run ends, the runner heartbeats with the run token at
+   the interval FerrFleet asks for.
+4. When FerrFleet takes the run back (a `410` on the heartbeat because it was
+   cancelled or superseded, or a `409` on any route because this runner lost the
+   lease), the runner kills `claude`, reports nothing more for that run, and goes
+   back to polling.
+5. Each run gets its own directory under `FERRFLEET_WORKING_DIR`, removed when
+   the run is over, so the next run never clones into a used checkout.
+
+One process executes one run at a time. To run several at once, start several
+processes, each with its own working directory.
+
+### Ephemeral runners
+
+`ferrfleet-runner agent --ephemeral` takes one run and exits, so each run starts
+on a clean machine and an orchestrator (a Kubernetes Job, an autoscaled VM)
+replaces the process. It exits `0` when the run completed successfully or
+FerrFleet took it back, and `1` when the run failed, the runner could not execute
+it, or the pool token was refused.
+
+### Stopping a runner
+
+On `SIGTERM` or `SIGINT` the runner stops polling. A run in progress is left to
+finish, within the run's own timeout, and its heartbeats carry on until then.
+Give the process a grace period that matches your agents' timeout. If it is
+killed before that, the heartbeats stop and FerrFleet settles the run itself
+after the lease lapses: a run not yet claimed goes back to the pool, a claimed
+one is marked failed rather than run twice.
+
 ## What is in here
 
 `shared/` is the contract: the shapes the API and the runner agree on

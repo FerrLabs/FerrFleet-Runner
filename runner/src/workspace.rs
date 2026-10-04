@@ -31,6 +31,8 @@ use tokio::process::Command;
 use tracing::info;
 use uuid::Uuid;
 
+use crate::config::Env;
+
 /// Script temporaire pointé par `GIT_ASKPASS` : a chaque invocation par
 /// `git`, il recupere lui-meme un token aupres de l'API
 /// (`FERRFLEET_API_URL`/`FERRFLEET_RUN_ID`/`FERRFLEET_RUN_TOKEN`, deja
@@ -127,7 +129,7 @@ impl GitCredentials {
 /// Toute erreur nomme l'étape en échec, pour que le run s'arrête avant le
 /// lancement du CLI plutôt que de laisser l'agent travailler dans un dépôt
 /// à moitié prêt.
-pub async fn prepare(checkout: &Checkout, workdir: &Path) -> Result<GitCredentials> {
+pub async fn prepare(checkout: &Checkout, workdir: &Path, run: &Env) -> Result<GitCredentials> {
     validate_branch_name(&checkout.branch)
         .context("etape 'validation du nom de branche' de la preparation du depot")?;
 
@@ -137,22 +139,27 @@ pub async fn prepare(checkout: &Checkout, workdir: &Path) -> Result<GitCredentia
     let credentials = GitCredentials::create()
         .context("etape 'preparation du canal d'authentification' de la preparation du depot")?;
 
-    clone(checkout, workdir, &credentials)
+    clone(checkout, workdir, &credentials, run)
         .await
         .context("etape 'clone' de la preparation du depot")?;
 
-    configure_identity(workdir)
+    configure_identity(workdir, run)
         .await
         .context("etape 'configuration de l'identite git' de la preparation du depot")?;
 
-    checkout_branch(checkout, workdir, &credentials)
+    checkout_branch(checkout, workdir, &credentials, run)
         .await
         .context("etape 'checkout de la branche' de la preparation du depot")?;
 
     Ok(credentials)
 }
 
-async fn clone(checkout: &Checkout, workdir: &Path, credentials: &GitCredentials) -> Result<()> {
+async fn clone(
+    checkout: &Checkout,
+    workdir: &Path,
+    credentials: &GitCredentials,
+    run: &Env,
+) -> Result<()> {
     // Aucun token dans l'URL : seul le nom d'utilisateur "x-access-token"
     // (fixe, non secret) y figure. `git` demande le mot de passe via
     // `GIT_ASKPASS`.
@@ -177,17 +184,17 @@ async fn clone(checkout: &Checkout, workdir: &Path, credentials: &GitCredentials
     credentials.apply(&mut cmd);
 
     info!(repo = %checkout.repo, base_branch = ?checkout.base_branch, "clonage du depot");
-    run_git(cmd, "git clone").await
+    run_git(cmd, "git clone", run).await
 }
 
-async fn configure_identity(workdir: &Path) -> Result<()> {
+async fn configure_identity(workdir: &Path, run: &Env) -> Result<()> {
     let mut name_cmd = Command::new("git");
     name_cmd
         .current_dir(workdir)
         .arg("config")
         .arg("user.name")
         .arg("ferrfleet[bot]");
-    run_git(name_cmd, "git config user.name").await?;
+    run_git(name_cmd, "git config user.name", run).await?;
 
     let mut email_cmd = Command::new("git");
     email_cmd
@@ -195,13 +202,14 @@ async fn configure_identity(workdir: &Path) -> Result<()> {
         .arg("config")
         .arg("user.email")
         .arg("ferrfleet[bot]@users.noreply.github.com");
-    run_git(email_cmd, "git config user.email").await
+    run_git(email_cmd, "git config user.email", run).await
 }
 
 async fn checkout_branch(
     checkout: &Checkout,
     workdir: &Path,
     credentials: &GitCredentials,
+    run: &Env,
 ) -> Result<()> {
     if checkout.existing {
         info!(branch = %checkout.branch, "reprise de la branche existante");
@@ -216,7 +224,7 @@ async fn checkout_branch(
             .arg("--")
             .arg(&checkout.branch);
         credentials.apply(&mut fetch_cmd);
-        run_git(fetch_cmd, "git fetch de la branche existante").await?;
+        run_git(fetch_cmd, "git fetch de la branche existante", run).await?;
 
         // Le clone met en place le refspec de suivi par défaut d'origin, donc
         // `refs/remotes/origin/<branche>` existe déjà après le fetch
@@ -235,7 +243,7 @@ async fn checkout_branch(
             .arg(&checkout.branch)
             .arg("--track")
             .arg(format!("refs/remotes/origin/{}", checkout.branch));
-        run_git(checkout_cmd, "git checkout de la branche existante").await
+        run_git(checkout_cmd, "git checkout de la branche existante", run).await
     } else {
         info!(branch = %checkout.branch, "creation de la branche de travail");
         let mut cmd = Command::new("git");
@@ -243,7 +251,7 @@ async fn checkout_branch(
             .arg("checkout")
             .arg("-b")
             .arg(&checkout.branch);
-        run_git(cmd, "git checkout -b").await
+        run_git(cmd, "git checkout -b", run).await
     }
 }
 
@@ -271,7 +279,8 @@ fn validate_branch_name(branch: &str) -> Result<()> {
 /// à `GIT_ASKPASS` ; on continue néanmoins à ne jamais faire remonter
 /// stdout/stderr bruts dans le message d'erreur, uniquement le code de
 /// sortie.
-async fn run_git(mut cmd: Command, step: &str) -> Result<()> {
+async fn run_git(mut cmd: Command, step: &str, run: &Env) -> Result<()> {
+    run.apply_to(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = cmd
         .output()
