@@ -1,0 +1,13 @@
+apiVersion: v2
+name: ferrfleet-runner
+description: A pool of FerrFleet runners that take runs from a runner pool, autoscaled on its queue with KEDA.
+type: application
+version: 0.0.0
+appVersion: "1"
+home: https://github.com/FerrLabs/FerrFleet-Runner
+sources:
+  - https://github.com/FerrLabs/FerrFleet-Runner
+keywords:
+  - ferrfleet
+  - runner
+  - keda

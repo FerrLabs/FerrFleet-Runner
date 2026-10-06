@@ -1,0 +1,18 @@
+{{- if eq .Values.mode "deployment" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ferrfleet-runner.fullname" . }}
+  labels:
+    {{- include "ferrfleet-runner.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.deployment.replicas }}
+  selector:
+    matchLabels:
+      {{- include "ferrfleet-runner.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- include "ferrfleet-runner.podMetadata" . | nindent 6 }}
+    spec:
+      {{- include "ferrfleet-runner.podSpec" . | trim | nindent 6 }}
+{{- end }}

@@ -153,3 +153,52 @@ jobs:
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
         with:
           shellcheck: true
+
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with:
+          version: v4.2.3
+
+      - name: Lint
+        run: |
+          for values in charts/ferrfleet-runner/ci/*-values.yaml; do
+            helm lint charts/ferrfleet-runner --strict --values "${values}"
+          done
+
+      - name: Render
+        run: |
+          mkdir rendered
+          helm template ferrfleet-runner charts/ferrfleet-runner \
+            --values charts/ferrfleet-runner/ci/default-values.yaml > rendered/scaledjob.yaml
+          helm template ferrfleet-runner charts/ferrfleet-runner \
+            --values charts/ferrfleet-runner/ci/deployment-values.yaml > rendered/deployment.yaml
+          grep -q 'kind: ScaledJob' rendered/scaledjob.yaml
+          grep -q -- '- --ephemeral' rendered/scaledjob.yaml
+          grep -q 'kind: Deployment' rendered/deployment.yaml
+          if grep -q -e 'keda.sh' -e '--ephemeral' rendered/deployment.yaml; then
+            echo "::error::deployment mode rendered KEDA objects or an ephemeral runner"
+            exit 1
+          fi
+
+      - name: Refuse a release without a pool token
+        run: |
+          if helm template ferrfleet-runner charts/ferrfleet-runner >/dev/null 2>&1; then
+            echo "::error::the chart rendered without a pool token"
+            exit 1
+          fi
+
+      - name: Validate against the Kubernetes and KEDA schemas
+        run: |
+          docker run --rm -v "${PWD}/rendered:/rendered:ro" \
+            ghcr.io/yannh/kubeconform@sha256:faffaf43f95aa6425306e1ab8d6fcad72acb9049158f38e574c085ea1ec0f64e \
+            -strict -summary -kubernetes-version 1.32.0 \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            /rendered

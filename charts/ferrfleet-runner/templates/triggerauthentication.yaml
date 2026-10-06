@@ -1,0 +1,13 @@
+{{- if eq .Values.mode "scaledJob" }}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "ferrfleet-runner.fullname" . }}
+  labels:
+    {{- include "ferrfleet-runner.labels" . | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: token
+      name: {{ include "ferrfleet-runner.poolTokenSecret" . }}
+      key: {{ .Values.poolToken.key }}
+{{- end }}

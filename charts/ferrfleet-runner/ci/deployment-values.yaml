@@ -1,0 +1,19 @@
+mode: deployment
+poolToken:
+  existingSecret: ferrfleet-pool
+  key: token
+claudeCredential:
+  env: CLAUDE_CODE_OAUTH_TOKEN
+  existingSecret: claude
+  key: oauth-token
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+nodeSelector:
+  kubernetes.io/arch: amd64
+tolerations:
+  - key: ferrfleet
+    operator: Exists
+    effect: NoSchedule
+extraEnv:
+  - name: HTTPS_PROXY
+    value: http://proxy.internal:3128

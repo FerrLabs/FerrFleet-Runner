@@ -1,0 +1,21 @@
+services:
+  runner:
+    image: ghcr.io/ferrlabs/ferrfleet/runner:${RUNNER_TAG:-1}
+    command: ["agent"]
+    env_file: .env
+    environment:
+      HOME: /tmp
+      FERRFLEET_WORKING_DIR: /workdir
+    deploy:
+      replicas: ${RUNNER_REPLICAS:-2}
+    restart: unless-stopped
+    stop_grace_period: 30m
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    volumes:
+      - /workdir
