@@ -290,10 +290,10 @@ template without killing the Jobs already running a run.
 
 ### Which Claude credential
 
-Use an Anthropic API key, from a workspace kept for these runs. A Claude
-subscription token also works, with `claudeCredential.env=CLAUDE_CODE_OAUTH_TOKEN`,
-but it is not the recommended option: it belongs to one person's plan, and every
-runner of the pool then draws on that one plan's usage limits.
+Use an Anthropic API key, from an Anthropic Console workspace kept for these runs,
+so their spend and rate limits show on their own. The chart passes it to the
+runners as `ANTHROPIC_API_KEY`. It stays in your cluster: the runner never sends
+it to FerrFleet.
 
 ## Run a pool with Docker Compose
 
