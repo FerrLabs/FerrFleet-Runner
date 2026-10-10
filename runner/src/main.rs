@@ -302,23 +302,26 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<RunO
 
 /// Appended to every run's system prompt, so an agent does not spend a turn
 /// discovering its environment.
-fn runner_environment_note(working_dir: &str) -> String {
-    format!(
-        "Environment: you are executing a FerrFleet agent run. Use the MCP \
-GitHub tools for every GitHub operation. Do NOT use the GitHub CLI (`gh`) \
+const RUNNER_ENVIRONMENT_NOTE: &str = "Environment: you are executing a FerrFleet agent run. \
+Use the MCP GitHub tools for every GitHub operation. Do NOT use the GitHub CLI (`gh`) \
 even where it is installed: it routes around the connector's denied-tool \
 list. If an MCP GitHub tool is refused, that refusal is deliberate; do not \
 look for another way around it. Available CLI tools are `git`, `curl`, `jq`, \
-`python3` and `ferrfleet-runner`. The working directory is {working_dir}, and \
-you may write there and in /tmp, nowhere else. When a repository is checked \
+`python3` and `ferrfleet-runner`. Work in the current working directory: you \
+may write there and in /tmp, nowhere else. When a repository is checked \
 out, `git push` is already authenticated: push with plain `git push -u origin \
 HEAD`, never with a token in the remote URL, and never with --force. \
 `ferrfleet-runner pull-request <url>` records the pull request you opened, \
 `ferrfleet-runner resolve-thread <thread_id>` resolves one review thread, and \
 `ferrfleet-runner result '<json>'` records what you concluded, as a JSON \
 object, for whatever reads this run next. Record one when the task has an \
-answer worth acting on."
-    )
+answer worth acting on.";
+
+fn appended_system_prompt(stable: Option<&str>) -> String {
+    match stable {
+        Some(stable) => format!("{stable}\n\n{RUNNER_ENVIRONMENT_NOTE}"),
+        None => RUNNER_ENVIRONMENT_NOTE.to_owned(),
+    }
 }
 
 /// The Vault Agent sidecar writes `CLAUDE_CODE_OAUTH_TOKEN` into a file
@@ -580,22 +583,104 @@ mod result_argument_tests {
 mod environment_note_tests {
     use super::*;
 
-    #[test]
-    fn the_note_states_the_working_directory_it_was_given() {
-        let note = runner_environment_note("/home/runner/work/_temp/ferrfleet-workdir");
+    const STABLE: &str = "## How to write\n\nplain\n\nreview the pull request";
 
-        assert!(
-            note.contains("The working directory is /home/runner/work/_temp/ferrfleet-workdir,")
+    fn config(run_id: &str, working_dir: &str, head_sha: &str, stable: Option<&str>) -> RunConfig {
+        let per_run = format!("## Event context\n```json\n{{\"head_sha\": \"{head_sha}\"}}\n```");
+        let mut cfg: RunConfig = serde_json::from_value(serde_json::json!({
+            "run_id": run_id,
+            "agent_id": "pr-agent",
+            "prompt": format!("{STABLE}\n\n{per_run}"),
+            "working_dir": working_dir,
+        }))
+        .expect("a minimal config");
+        cfg.stable_prefix = stable.map(str::to_owned);
+        cfg
+    }
+
+    fn env(working_dir: &str) -> Env {
+        Env {
+            api_url: "http://api.invalid".to_owned(),
+            run_id: "run".to_owned(),
+            run_token: "token".to_owned(),
+            working_dir: Some(working_dir.to_owned()),
+            runner_name: None,
+        }
+    }
+
+    fn arg_after(cfg: &RunConfig, flag: &str) -> String {
+        let cmd = build_claude_command(cfg, &env(&cfg.working_dir), None).expect("building");
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        let at = args
+            .iter()
+            .position(|a| *a == flag)
+            .unwrap_or_else(|| panic!("{flag} is passed"));
+        args[at + 1].to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn two_runs_of_one_agent_send_a_byte_identical_system_prompt() {
+        let first = config(
+            "01999999-9999-7999-9999-999999999991",
+            "/home/runner/work/_temp/ferrfleet-workdir-a1B2c3",
+            "1111111",
+            Some(STABLE),
         );
-        assert!(!note.contains("/workdir,"));
+        let second = config(
+            "01999999-9999-7999-9999-999999999992",
+            "/home/runner/work/_temp/ferrfleet-workdir-Z9y8X7",
+            "2222222",
+            Some(STABLE),
+        );
+
+        let system = arg_after(&first, "--append-system-prompt");
+
+        assert_eq!(system, arg_after(&second, "--append-system-prompt"));
+        assert!(system.starts_with(STABLE));
+        for per_run in ["1111111", "ferrfleet-workdir", "999999991", "Event context"] {
+            assert!(
+                !system.contains(per_run),
+                "{per_run} leaked into the system prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn the_stable_part_is_not_repeated_in_the_user_turn() {
+        let cfg = config(
+            "01999999-9999-7999-9999-999999999991",
+            "/workdir",
+            "1111111",
+            Some(STABLE),
+        );
+
+        let user = arg_after(&cfg, "-p");
+
+        assert!(user.starts_with("## Event context"));
+        assert!(user.contains("1111111"));
+        assert!(!user.contains("review the pull request"));
+    }
+
+    #[test]
+    fn an_api_that_sends_no_stable_prefix_still_gets_its_whole_prompt_run() {
+        let cfg = config(
+            "01999999-9999-7999-9999-999999999991",
+            "/workdir",
+            "1111111",
+            None,
+        );
+
+        assert_eq!(arg_after(&cfg, "-p"), cfg.prompt);
+        assert_eq!(
+            arg_after(&cfg, "--append-system-prompt"),
+            RUNNER_ENVIRONMENT_NOTE
+        );
     }
 
     #[test]
     fn the_note_forbids_gh_without_claiming_it_is_absent() {
-        let note = runner_environment_note("/workdir");
-
-        assert!(note.contains("Do NOT use the GitHub CLI (`gh`)"));
-        assert!(!note.contains("is NOT installed"));
+        assert!(RUNNER_ENVIRONMENT_NOTE.contains("Do NOT use the GitHub CLI (`gh`)"));
+        assert!(!RUNNER_ENVIRONMENT_NOTE.contains("is NOT installed"));
     }
 }
 
@@ -848,15 +933,16 @@ fn build_claude_command(
     env: &Env,
     git_credentials: Option<&workspace::GitCredentials>,
 ) -> Result<Command> {
+    let prompt = cfg.prompt_parts();
     let mut cmd = Command::new("claude");
     cmd.arg("-p")
         // A run without a checkout has no repository, so there is nothing for
         // one to have stated. Announcing an absent file there would answer a
         // question nobody asked, about a repository that does not exist.
         .arg(if cfg.checkout.is_some() {
-            prompt_with_repo_context(&cfg.prompt, &cfg.agent_id, &cfg.working_dir)
+            prompt_with_repo_context(prompt.per_run, &cfg.agent_id, &cfg.working_dir)
         } else {
-            cfg.prompt.clone()
+            prompt.per_run.to_owned()
         })
         .arg("--output-format")
         .arg("stream-json")
@@ -912,7 +998,8 @@ fn build_claude_command(
     // but a runner we do not build may have it, so the note forbids it rather
     // than claiming it is absent.
     cmd.arg("--append-system-prompt")
-        .arg(runner_environment_note(&cfg.working_dir));
+        .arg(appended_system_prompt(prompt.stable))
+        .arg("--exclude-dynamic-system-prompt-sections");
 
     if let Some(mcp_config) = &cfg.mcp_config {
         let path = std::path::Path::new(&cfg.working_dir).join(".ferrfleet-mcp.json");

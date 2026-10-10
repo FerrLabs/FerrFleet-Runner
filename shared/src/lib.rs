@@ -1,4 +1,6 @@
+pub mod prompt;
 pub mod runner_mode;
+pub use prompt::PromptParts;
 pub use runner_mode::RunnerMode;
 
 use chrono::{DateTime, Utc};
@@ -10,6 +12,8 @@ pub struct RunConfig {
     pub run_id: Uuid,
     pub agent_id: String,
     pub prompt: String,
+    #[serde(default)]
+    pub stable_prefix: Option<String>,
     pub working_dir: String,
     #[serde(default)]
     pub allowed_tools: Vec<String>,
