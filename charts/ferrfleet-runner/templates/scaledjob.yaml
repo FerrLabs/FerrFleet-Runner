@@ -1,0 +1,37 @@
+{{- if eq .Values.mode "scaledJob" }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: {{ include "ferrfleet-runner.fullname" . }}
+  labels:
+    {{- include "ferrfleet-runner.labels" . | nindent 4 }}
+spec:
+  pollingInterval: {{ .Values.scaledJob.pollingInterval }}
+  minReplicaCount: {{ .Values.scaledJob.minReplicaCount }}
+  maxReplicaCount: {{ .Values.scaledJob.maxReplicaCount }}
+  successfulJobsHistoryLimit: {{ .Values.scaledJob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.scaledJob.failedJobsHistoryLimit }}
+  rollout:
+    strategy: gradual
+  scalingStrategy:
+    strategy: accurate
+  jobTargetRef:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: {{ .Values.scaledJob.ttlSecondsAfterFinished }}
+    template:
+      metadata:
+        {{- include "ferrfleet-runner.podMetadata" . | nindent 8 }}
+      spec:
+        restartPolicy: Never
+        {{- include "ferrfleet-runner.podSpec" . | trim | nindent 8 }}
+  triggers:
+    - type: metrics-api
+      metadata:
+        url: {{ printf "%s/runner-pools/queue" (include "ferrfleet-runner.apiUrl" .) | quote }}
+        format: json
+        valueLocation: waiting
+        targetValue: "1"
+        authMode: bearer
+      authenticationRef:
+        name: {{ include "ferrfleet-runner.fullname" . }}
+{{- end }}

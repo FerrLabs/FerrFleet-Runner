@@ -1,0 +1,79 @@
+mode: scaledJob
+
+apiUrl: https://api.ferrfleet.com
+
+poolToken:
+  existingSecret: ""
+  key: pool-token
+  value: ""
+
+claudeCredential:
+  env: ANTHROPIC_API_KEY
+  existingSecret: ""
+  key: anthropic-api-key
+  value: ""
+
+image:
+  repository: ghcr.io/ferrlabs/ferrfleet/runner
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+fullnameOverride: ""
+
+scaledJob:
+  pollingInterval: 10
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  ttlSecondsAfterFinished: 3600
+
+deployment:
+  replicas: 2
+
+terminationGracePeriodSeconds: 1800
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+    ephemeral-storage: 1Gi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+    ephemeral-storage: 12Gi
+
+workdirSizeLimit: 10Gi
+tmpSizeLimit: 512Mi
+
+extraEnv: []
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountToken: false
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

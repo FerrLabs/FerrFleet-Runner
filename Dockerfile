@@ -40,6 +40,7 @@ RUN su runner -c "curl -fsSL https://claude.ai/install.sh | bash -s -- '${CLAUDE
  && /home/runner/.local/bin/claude --version
 
 COPY --from=builder /build/target/release/ferrfleet-runner /usr/local/bin/ferrfleet-runner
+RUN install -d -o runner -g runner /workdir
 
 USER runner
 WORKDIR /workdir

@@ -223,6 +223,97 @@ killed before that, the heartbeats stop and FerrFleet settles the run itself
 after the lease lapses: a run not yet claimed goes back to the pool, a claimed
 one is marked failed rather than run twice.
 
+## Run a pool on Kubernetes
+
+The chart in [`charts/ferrfleet-runner`](charts/ferrfleet-runner) runs a pool with
+[KEDA](https://keda.sh): a `ScaledJob` asks FerrFleet how many runs of the pool are
+waiting (`GET /runner-pools/queue`, with the pool token) and starts one Job per
+waiting run, each running `agent --ephemeral`. Nothing waiting, nothing runs. KEDA
+must already be installed in the cluster.
+
+Put both credentials in a Secret, then install the chart from GHCR:
+
+```bash
+kubectl create namespace ferrfleet
+kubectl -n ferrfleet create secret generic ferrfleet-pool \
+  --from-literal=pool-token="$FERRFLEET_POOL_TOKEN" \
+  --from-literal=anthropic-api-key="$ANTHROPIC_API_KEY"
+
+helm install ferrfleet-runner oci://ghcr.io/ferrlabs/charts/ferrfleet-runner \
+  --namespace ferrfleet \
+  --set poolToken.existingSecret=ferrfleet-pool \
+  --set claudeCredential.existingSecret=ferrfleet-pool
+```
+
+Charts are published to `oci://ghcr.io/ferrlabs/charts/ferrfleet-runner` by the
+release workflow, under the same version as the image, and signed with cosign the
+same way. A chart's `appVersion` is its runner version, which is the image tag it
+uses unless you set one.
+
+The pod matches the Jobs FerrFleet runs in its own cluster: uid 1000, a read-only
+root filesystem, every capability dropped, `HOME` on a writable `/tmp` and runs in
+an `emptyDir` at `/workdir`. The service account it creates carries no RBAC and
+mounts no token, because the runner never talks to the Kubernetes API.
+
+| Value | Default | What |
+| --- | --- | --- |
+| `mode` | `scaledJob` | `scaledJob` needs KEDA. `deployment` runs `deployment.replicas` long-lived runners (`agent`, not ephemeral) and needs nothing else. |
+| `apiUrl` | `https://api.ferrfleet.com` | The FerrFleet API, for runs and for the queue depth. |
+| `poolToken.existingSecret` | | A Secret holding the pool token. |
+| `poolToken.key` | `pool-token` | Its key in that Secret. |
+| `poolToken.value` | | The token itself, written to a Secret the chart creates. Prefer `existingSecret`, so the token stays out of your values files. |
+| `claudeCredential.env` | `ANTHROPIC_API_KEY` | The variable `claude` reads it from. |
+| `claudeCredential.existingSecret` | | A Secret holding the credential. |
+| `claudeCredential.key` | `anthropic-api-key` | Its key in that Secret. |
+| `claudeCredential.value` | | The credential itself, same as `poolToken.value`. |
+| `image.repository` | `ghcr.io/ferrlabs/ferrfleet/runner` | |
+| `image.tag` | the chart's `appVersion` | |
+| `image.digest` | | Pins the image by digest, and wins over the tag. |
+| `scaledJob.pollingInterval` | `10` | Seconds between two queue reads. |
+| `scaledJob.minReplicaCount` | `0` | Jobs kept running with nothing waiting. |
+| `scaledJob.maxReplicaCount` | `10` | Most runs executing at once. |
+| `scaledJob.ttlSecondsAfterFinished` | `3600` | How long a finished Job and its logs stay. |
+| `deployment.replicas` | `2` | Runners in `deployment` mode. |
+| `terminationGracePeriodSeconds` | `1800` | Time a stopping runner has to finish its run. Match your agents' timeout. |
+| `resources` | requests `500m`, `512Mi`, `1Gi` ephemeral storage; limits `2` CPU, `2Gi`, `12Gi` ephemeral storage | The managed runner's CPU and memory, with room for a checkout in ephemeral storage. |
+| `workdirSizeLimit` | `10Gi` | Size of the `/workdir` emptyDir a run clones into. |
+| `tmpSizeLimit` | `512Mi` | Size of the `/tmp` emptyDir, which is also `HOME`. |
+| `extraEnv` | `[]` | More environment for the runner, for instance `HTTPS_PROXY`. |
+| `serviceAccount.create`, `.name`, `.annotations` | `true`, release name, `{}` | |
+| `nodeSelector`, `tolerations`, `affinity` | empty | |
+| `podSecurityContext`, `securityContext` | see above | |
+| `podAnnotations`, `podLabels`, `imagePullSecrets`, `fullnameOverride` | empty | |
+
+The scaler uses KEDA's `accurate` strategy: `waiting` already leaves out the runs
+a Job holds, so nothing is counted twice. Upgrading the release replaces the Job
+template without killing the Jobs already running a run.
+
+### Which Claude credential
+
+Use an Anthropic API key, from an Anthropic Console workspace kept for these runs,
+so their spend and rate limits show on their own. The chart passes it to the
+runners as `ANTHROPIC_API_KEY`. It stays in your cluster: the runner never sends
+it to FerrFleet.
+
+## Run a pool with Docker Compose
+
+For a host without Kubernetes,
+[`examples/compose`](examples/compose/docker-compose.yml) runs a fixed number of
+long-lived runners with the same hardening as the chart: read-only root, no
+capabilities, a tmpfs `/tmp`, and a volume of its own per replica for runs.
+
+```bash
+cd examples/compose
+cp .env.example .env
+$EDITOR .env
+docker compose up -d
+```
+
+`.env` holds the pool token and the Anthropic API key, so keep it out of version
+control (this repository ignores it). `RUNNER_REPLICAS` sets how many runners
+start, `RUNNER_TAG` which image they run. `stop_grace_period` is 30 minutes, so
+`docker compose down` lets runs in progress finish first.
+
 ## What is in here
 
 `shared/` is the contract: the shapes the API and the runner agree on
@@ -243,6 +334,9 @@ cosign verify ghcr.io/ferrlabs/ferrfleet/runner:1 \
   --certificate-identity-regexp '^https://github.com/FerrLabs/FerrFleet-Runner/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
+
+The chart is signed the same way, so the same check applies to
+`ghcr.io/ferrlabs/charts/ferrfleet-runner:<version>`.
 
 Every release carries `checksums.txt` over its binaries, and a cosign bundle
 over that file. The action checks the hash, which catches a truncated download.
@@ -268,8 +362,10 @@ deliberate, and worth keeping true.
 ## Releasing
 
 Tag a full version and push it. The workflow builds, pushes, signs with cosign
-and attaches an SBOM, tagging the image `1.2.3`, `1` and `latest`. It also
-builds the static musl binaries for x86_64 and aarch64, and publishes a GitHub
+and attaches an SBOM, tagging the image `1.2.3`, `1` and `latest`. It packages
+the chart with that same version as both its `version` and `appVersion` (the
+committed `Chart.yaml` carries placeholders), pushes it to
+`oci://ghcr.io/ferrlabs/charts` and signs it by digest. It also builds the static musl binaries for x86_64 and aarch64, and publishes a GitHub
 release carrying them, their `checksums.txt` and its cosign bundle. That release
 is what `mode: binary` downloads, so a version with no release cannot be used
 that way.
