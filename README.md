@@ -14,6 +14,18 @@ Given a run id and a token, it asks the API for the run's configuration, clones
 the repository if the run has one, starts the `claude` CLI with the composed
 prompt, streams the events back as they happen, and reports the result.
 
+The prompt is split so it caches across runs. When the configuration carries a
+`stable_prefix` that `prompt` starts with, that prefix (the agent's own
+instructions, the same on every run of the agent) goes into the system prompt
+through `--append-system-prompt`, and only the rest of `prompt` (the event
+context, the diff, the repository context) is the `-p` turn. The environment note
+appended after it holds no per-run value, and `--exclude-dynamic-system-prompt-sections`
+keeps the auto memory path, which follows the working directory, out of the
+system prompt. Two runs of the same agent therefore send a byte-identical system
+prompt, and the second one reads it from the prompt cache. Without a
+`stable_prefix`, or when `prompt` does not start with it, the whole `prompt` is
+the `-p` turn, as before.
+
 Everything it needs arrives at startup:
 
 | Variable | Required | What |
@@ -91,7 +103,7 @@ of that major, matching what `image: ...runner:1` does, and a full `1.2.3` takes
 that one exactly.
 
 The agent runs in a fresh `$RUNNER_TEMP/ferrfleet-workdir-XXXXXX` rather than the
-`/workdir` of the image, and is told so in its system prompt. The run looks
+`/workdir` of the image, and Claude Code tells it which directory it is in. The run looks
 identical from FerrFleet's side.
 
 What does differ, and it is the thing to weigh: the container was the isolation
