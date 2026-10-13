@@ -22,6 +22,7 @@ use heartbeat::Heartbeat;
 use pool::{Lease, Poll, PoolClient};
 
 const USAGE: &str = "usage: ferrfleet-runner agent [--ephemeral]";
+const DISPATCH_USAGE: &str = "usage: ferrfleet-runner dispatch <agent-id> <context-json>";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -66,10 +67,35 @@ pub async fn run_subcommand(args: &[String]) -> Result<()> {
     let config = AgentConfig::from_env().context("loading the agent environment")?;
     info!(runner = %config.runner_name, ?mode, "taking runs from the pool");
 
-    let agent = Agent::new(config, Timings::PRODUCTION, |env, sender| async move {
-        crate::supervise(&env, &sender).await
-    });
-    match agent.serve(mode, shutdown_on_signal()?).await? {
+    let agent = Agent::new(config, Timings::PRODUCTION, execute);
+    exit_status(agent.serve(mode, shutdown_on_signal()?).await?)
+}
+
+pub async fn dispatch_subcommand(args: &[String]) -> Result<()> {
+    let [agent_id, context] = args else {
+        bail!(DISPATCH_USAGE);
+    };
+    let context: serde_json::Value =
+        serde_json::from_str(context).context("the dispatch context is not JSON")?;
+    if !context.is_object() {
+        bail!("the dispatch context must be a JSON object");
+    }
+    let config = AgentConfig::from_env().context("loading the agent environment")?;
+    info!(runner = %config.runner_name, %agent_id, "dispatching a run on the pool");
+
+    let run_id_file = std::env::var_os("FERRFLEET_RUN_ID_FILE").map(std::path::PathBuf::from);
+    let ended = Agent::new(config, Timings::PRODUCTION, execute)
+        .dispatch(agent_id, &context, run_id_file.as_deref())
+        .await?;
+    exit_status(ended)
+}
+
+async fn execute(env: Env, sender: EventSender) -> Result<RunOutcome> {
+    crate::supervise(&env, &sender).await
+}
+
+fn exit_status(ended: Ended) -> Result<()> {
+    match ended {
         Ended::Shutdown | Ended::RunDone => Ok(()),
         Ended::RunFailed => bail!("the run failed"),
     }
@@ -151,6 +177,21 @@ where
             }
             retry_delay = (retry_delay * 2).min(self.timings.poll_retry_max);
         }
+    }
+
+    pub async fn dispatch(
+        &self,
+        agent_id: &str,
+        context: &serde_json::Value,
+        run_id_file: Option<&Path>,
+    ) -> Result<Ended> {
+        let lease = self.pool.dispatch(agent_id, context).await?;
+        if let Some(path) = run_id_file
+            && let Err(err) = std::fs::write(path, lease.run_id.to_string())
+        {
+            warn!(?err, path = %path.display(), "could not record the run id");
+        }
+        Ok(self.take(lease).await)
     }
 
     async fn take(&self, lease: Lease) -> Ended {

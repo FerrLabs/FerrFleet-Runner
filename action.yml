@@ -11,7 +11,7 @@ inputs:
     description: 'Agent id to run. It must be set to an external runner in FerrFleet, otherwise the API refuses the run.'
     required: true
   token:
-    description: 'FerrFleet organization token carrying the `agents:run` scope. A personal token cannot create a run: it resolves to a human and is stripped of its org.'
+    description: 'FerrFleet organization token carrying the `agents:run` scope, or a runner pool token (`ffrp_...`) that dispatches the run on its own pool. A personal token cannot create a run: it resolves to a human and is stripped of its org.'
     required: true
   claude-token:
     description: 'Your Claude Code OAuth token. It never reaches FerrFleet; the agent runs on it here.'
@@ -186,7 +186,7 @@ runs:
         esac
 
         if [ -z "${FERRFLEET_ORG_TOKEN}" ]; then
-          echo "::error::The token input is empty. Set a FerrFleet organization token carrying the 'agents:run' scope, usually from a repository secret."
+          echo "::error::The token input is empty. Set a FerrFleet organization token carrying the 'agents:run' scope, or a runner pool token, usually from a repository secret."
           exit 1
         fi
 
@@ -203,6 +203,58 @@ runs:
             '{repo: $repo, pr_number: $pr}')
         else
           body=$(jq -nc --arg repo "${REPO}" '{repo: $repo}')
+        fi
+
+        execute_runner() {
+          if [ "${MODE}" = docker ]; then
+            docker run --rm "$@" "${IMAGE}" "${runner_args[@]}"
+          else
+            if [ -n "${CLAUDE_CLI_BIN:-}" ]; then
+              PATH="${CLAUDE_CLI_BIN}:${PATH}"
+              export PATH
+            fi
+
+            workdir=$(mktemp -d "${RUNNER_TEMP}/ferrfleet-workdir-XXXXXX")
+
+            env -u FERRFLEET_ORG_TOKEN \
+              FERRFLEET_WORKING_DIR="${workdir}" \
+              "${FERRFLEET_RUNNER_BIN}" "${runner_args[@]}"
+          fi
+        }
+
+        runner_args=()
+
+        if [[ "${FERRFLEET_ORG_TOKEN}" == ffrp_* ]]; then
+          run_id_file=$(mktemp)
+          chmod 666 "${run_id_file}"
+          export FERRFLEET_API_URL="${API_URL%/}"
+          export FERRFLEET_POOL_TOKEN="${FERRFLEET_ORG_TOKEN}"
+          export FERRFLEET_RUN_ID_FILE="${run_id_file}"
+          runner_args=(dispatch "${AGENT}" "${body}")
+
+          set +e
+          if [ "${MODE}" = docker ]; then
+            execute_runner \
+              -e FERRFLEET_API_URL -e FERRFLEET_POOL_TOKEN \
+              -e FERRFLEET_RUN_ID_FILE=/run-id -v "${run_id_file}:/run-id" \
+              -e FERRFLEET_WORKING_DIR=/workdir \
+              -e CLAUDE_CODE_OAUTH_TOKEN \
+              -e GITHUB_REPOSITORY -e GITHUB_RUN_ID
+          else
+            execute_runner
+          fi
+          status=$?
+          set -e
+
+          run_id=$(tr -d '[:space:]' < "${run_id_file}")
+          if [ -n "${run_id}" ]; then
+            {
+              echo "run-id=${run_id}"
+              echo "url=${API_URL%/}/runs/${run_id}"
+            } >> "${GITHUB_OUTPUT}"
+            echo "Dispatched run [\`${run_id}\`](${API_URL%/}/runs/${run_id})" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          exit "${status}"
         fi
 
         # Body and status separately, so a refusal is reported with what the API
@@ -263,21 +315,7 @@ runs:
         export FERRFLEET_RUN_ID="${run_id}"
         export FERRFLEET_RUN_TOKEN="${run_token}"
 
-        if [ "${MODE}" = docker ]; then
-          docker run --rm \
-            -e FERRFLEET_API_URL -e FERRFLEET_RUN_ID -e FERRFLEET_RUN_TOKEN \
-            -e CLAUDE_CODE_OAUTH_TOKEN \
-            -e GITHUB_REPOSITORY -e GITHUB_RUN_ID \
-            "${IMAGE}"
-        else
-          if [ -n "${CLAUDE_CLI_BIN:-}" ]; then
-            PATH="${CLAUDE_CLI_BIN}:${PATH}"
-            export PATH
-          fi
-
-          workdir=$(mktemp -d "${RUNNER_TEMP}/ferrfleet-workdir-XXXXXX")
-
-          env -u FERRFLEET_ORG_TOKEN \
-            FERRFLEET_WORKING_DIR="${workdir}" \
-            "${FERRFLEET_RUNNER_BIN}"
-        fi
+        execute_runner \
+          -e FERRFLEET_API_URL -e FERRFLEET_RUN_ID -e FERRFLEET_RUN_TOKEN \
+          -e CLAUDE_CODE_OAUTH_TOKEN \
+          -e GITHUB_REPOSITORY -e GITHUB_RUN_ID

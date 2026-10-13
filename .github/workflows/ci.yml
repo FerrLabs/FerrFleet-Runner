@@ -41,6 +41,9 @@ jobs:
       - name: Build
         run: cargo build --workspace --release
 
+      - name: Action routing
+        run: tests/action_routing.sh
+
   deny:
     name: Cargo Security
     runs-on: ubuntu-latest

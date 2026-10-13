@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use anyhow::{Context, bail};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -39,6 +40,7 @@ pub enum Refused {
 
 pub struct PoolClient {
     url: String,
+    dispatch_url: String,
     token: PoolToken,
     runner: String,
     client: reqwest::Client,
@@ -48,6 +50,7 @@ impl PoolClient {
     pub fn new(config: &AgentConfig, timeout: Duration) -> Self {
         Self {
             url: format!("{}/runner-pools/lease", config.api_url),
+            dispatch_url: format!("{}/runner-pools/dispatch", config.api_url),
             token: config.pool_token.clone(),
             runner: config.runner_name.clone(),
             client: reqwest::Client::builder()
@@ -83,4 +86,39 @@ impl PoolClient {
             ))),
         }
     }
+
+    pub async fn dispatch(
+        &self,
+        agent_id: &str,
+        context: &serde_json::Value,
+    ) -> anyhow::Result<Lease> {
+        let resp = self
+            .client
+            .post(&self.dispatch_url)
+            .bearer_auth(self.token.expose())
+            .json(&serde_json::json!({ "agent_id": agent_id, "context": context }))
+            .send()
+            .await
+            .context("reaching FerrFleet to dispatch the run")?;
+        let status = resp.status();
+        if status == StatusCode::OK {
+            return resp.json().await.context("decoding the dispatched run");
+        }
+        let body = resp.text().await.unwrap_or_default();
+        bail!(
+            "FerrFleet refused to dispatch a run ({status}): {}",
+            api_message(&body)
+        )
+    }
+}
+
+fn api_message(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| {
+            ["message", "error"]
+                .into_iter()
+                .find_map(|key| json.get(key)?.as_str().map(str::to_owned))
+        })
+        .unwrap_or_else(|| body.trim().to_owned())
 }

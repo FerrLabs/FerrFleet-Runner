@@ -71,6 +71,31 @@ runs that agent itself, and a second run started here would be a duplicate.
 Outputs are `run-id` and `url`, set as soon as the run exists, so a later step
 can comment the link on the pull request even when the run itself failed.
 
+### Dispatching with a pool token
+
+`token` also accepts a runner pool token (`ffrp_...`). The mode is chosen by the
+prefix: an `ffrp_` token dispatches, anything else is an organization token and
+behaves as above. A pool token only reaches the agents of its own pool, so it is
+a smaller secret to put in a repository than an organization token.
+
+```yaml
+      - uses: FerrLabs/FerrFleet-Runner@v1
+        with:
+          agent: pr-agent
+          token: ${{ secrets.FERRFLEET_POOL_TOKEN }}
+          claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+```
+
+The runner calls `POST /runner-pools/dispatch` with the agent and the event
+context, receives a run id and run token, and executes that run as a leased one:
+claim, configuration, clone, `claude`, events, result. The step exits with the
+run's status. The pool token is removed from the environment of `claude`, `git`
+and everything the agent starts. A `404`, `401` or `429` from the API fails the
+step with the message it sent. `run-id` and `url` are set once the run exists.
+
+The same thing from a shell: `ferrfleet-runner dispatch <agent-id> '<context-json>'`
+with `FERRFLEET_API_URL` and `FERRFLEET_POOL_TOKEN` set.
+
 ### Runners without a Docker daemon
 
 The default runs the published image, which needs a daemon. A hardened

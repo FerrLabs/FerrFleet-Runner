@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
         Some("pull-request") => return run_pull_request_subcommand(&args).await,
         Some("result") => return run_result_subcommand(&args).await,
         Some("agent") => return agent::run_subcommand(&args[2..]).await,
+        Some("dispatch") => return agent::dispatch_subcommand(&args[2..]).await,
         _ => {}
     }
 
@@ -616,6 +617,24 @@ mod environment_note_tests {
             .position(|a| *a == flag)
             .unwrap_or_else(|| panic!("{flag} is passed"));
         args[at + 1].to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn the_claude_command_drops_the_pool_token_it_would_inherit() {
+        let cfg = config(
+            "01999999-9999-7999-9999-999999999999",
+            "/workdir",
+            "abc",
+            None,
+        );
+        let cmd = build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
+
+        let removed = cmd
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == config::POOL_TOKEN_VAR)
+            .expect("the pool token variable is addressed explicitly");
+        assert_eq!(removed.1, None);
     }
 
     #[test]

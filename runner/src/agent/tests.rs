@@ -464,3 +464,164 @@ async fn each_run_works_in_a_fresh_directory_removed_after_it() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+const DISPATCH_PATH: &str = "/runner-pools/dispatch";
+
+fn is_dispatch(r: &Received) -> bool {
+    r.path == DISPATCH_PATH
+}
+
+fn pr_context() -> serde_json::Value {
+    serde_json::json!({ "repo": "acme/api", "pr_number": 42 })
+}
+
+#[tokio::test]
+async fn a_dispatch_creates_one_run_and_executes_it_like_a_lease() {
+    let api = FakeApi::routed(|r, _| {
+        if is_dispatch(r) {
+            leased(30)
+        } else {
+            Reply::status(200)
+        }
+    })
+    .await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(config(&api), TIMINGS, {
+        let seen = seen.clone();
+        move |env, _| {
+            seen.lock().unwrap().push((env.run_id, env.run_token));
+            async { Ok(RunOutcome::Completed { exit_code: 0 }) }
+        }
+    });
+
+    let ended = agent
+        .dispatch("pr-agent", &pr_context(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(ended, Ended::RunDone);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(RUN_ID.to_owned(), RUN_TOKEN.to_owned())]
+    );
+    let received = api.received();
+    let dispatch = received.iter().find(|r| is_dispatch(r)).unwrap();
+    assert_eq!(dispatch.method, "POST");
+    assert_eq!(
+        dispatch.authorization.as_deref(),
+        Some(&format!("Bearer {POOL_TOKEN}") as &str)
+    );
+    let body: serde_json::Value = serde_json::from_str(&dispatch.body).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({ "agent_id": "pr-agent", "context": pr_context() })
+    );
+    assert_eq!(count(&api, is_lease), 0, "a dispatch must not poll");
+    assert_eq!(count(&api, is_dispatch), 1);
+}
+
+#[tokio::test]
+async fn a_failed_run_ends_the_dispatch_as_failed() {
+    let api = FakeApi::routed(|r, _| {
+        if is_dispatch(r) {
+            leased(30)
+        } else {
+            Reply::status(200)
+        }
+    })
+    .await;
+    let agent = Agent::new(config(&api), TIMINGS, |_, _| async {
+        Ok(RunOutcome::Completed { exit_code: 3 })
+    });
+
+    let ended = agent
+        .dispatch("pr-agent", &pr_context(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(ended, Ended::RunFailed);
+}
+
+#[tokio::test]
+async fn a_dispatch_records_the_run_id_for_the_caller() {
+    let api = FakeApi::routed(|r, _| {
+        if is_dispatch(r) {
+            leased(30)
+        } else {
+            Reply::status(200)
+        }
+    })
+    .await;
+    let agent = Agent::new(config(&api), TIMINGS, |_, _| async {
+        Ok(RunOutcome::Completed { exit_code: 0 })
+    });
+    let file = std::env::temp_dir().join(format!("run-id-{}", uuid::Uuid::new_v4()));
+
+    agent
+        .dispatch("pr-agent", &pr_context(), Some(&file))
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), RUN_ID);
+    let _ = std::fs::remove_file(&file);
+}
+
+async fn a_refused_dispatch_says_what_the_api_said(status: u16, message: &'static str) {
+    let api = FakeApi::routed(move |r, _| {
+        if is_dispatch(r) {
+            Reply::json(status, &serde_json::json!({ "message": message }))
+        } else {
+            Reply::status(200)
+        }
+    })
+    .await;
+    let ran = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(config(&api), TIMINGS, {
+        let ran = ran.clone();
+        move |_, _| {
+            ran.fetch_add(1, Ordering::SeqCst);
+            async { Ok(RunOutcome::Completed { exit_code: 0 }) }
+        }
+    });
+
+    let err = agent
+        .dispatch("pr-agent", &pr_context(), None)
+        .await
+        .expect_err("a refusal is an error");
+
+    let text = format!("{err:#}");
+    assert!(text.contains(message), "{text}");
+    assert!(text.contains(&status.to_string()), "{text}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+    assert_eq!(count(&api, is_dispatch), 1, "a refusal was retried");
+}
+
+#[tokio::test]
+async fn a_dispatch_for_an_agent_outside_the_pool_is_refused_with_the_message() {
+    a_refused_dispatch_says_what_the_api_said(404, "no such agent in this pool").await;
+}
+
+#[tokio::test]
+async fn a_dispatch_with_a_bad_token_is_refused_with_the_message() {
+    a_refused_dispatch_says_what_the_api_said(401, "pool token revoked").await;
+}
+
+#[tokio::test]
+async fn a_rate_limited_dispatch_is_refused_with_the_message() {
+    a_refused_dispatch_says_what_the_api_said(429, "slow down").await;
+}
+
+#[tokio::test]
+async fn a_refusal_without_json_still_carries_the_body() {
+    let api = FakeApi::start(|_| Reply::status(503)).await;
+    let agent = Agent::new(config(&api), TIMINGS, |_, _| async {
+        Ok(RunOutcome::Completed { exit_code: 0 })
+    });
+
+    let err = agent
+        .dispatch("pr-agent", &pr_context(), None)
+        .await
+        .expect_err("a 503 is an error");
+
+    assert!(format!("{err:#}").contains("503"), "{err:#}");
+}
