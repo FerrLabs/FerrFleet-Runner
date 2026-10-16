@@ -27,6 +27,7 @@ pub struct EventSender {
 
 impl EventSender {
     pub const TIMEOUT: Duration = Duration::from_secs(10);
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
     pub fn new(env: Env) -> Self {
         Self::configured(env, Backoff::API_REDEPLOY, Self::TIMEOUT)
@@ -35,6 +36,7 @@ impl EventSender {
     pub fn configured(env: Env, backoff: Backoff, timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            .connect_timeout(Self::CONNECT_TIMEOUT)
             .build()
             .expect("building reqwest client");
         Self {

@@ -48,19 +48,7 @@ struct AskpassScript {
 impl AskpassScript {
     fn create() -> Result<Self> {
         let path = std::env::temp_dir().join(format!("ferrfleet-askpass-{}.sh", Uuid::new_v4()));
-        // `-sf` : silencieux et echec net (statut non nul, rien sur stdout)
-        // sur une reponse HTTP non-2xx. `sh` POSIX n'a pas `pipefail` : un
-        // `curl | sed` sous `set -e` retient le statut de `sed`, qui reussit
-        // trivialement meme sur une entree vide, donc un `curl` en echec
-        // aurait quand meme laisse le script sortir en succes avec une
-        // sortie vide. La reponse est donc capturee dans une variable AVANT
-        // le `sed`, avec un `|| exit 1` explicite sur le `curl` lui-meme :
-        // c'est ce qui fait echouer le script (et donc `git`) proprement sur
-        // une API injoignable ou une reponse non-2xx, pas `-f` seul. Le
-        // token n'est jamais un argument de `curl` : il est lu depuis la
-        // reponse JSON, seul `FERRFLEET_RUN_TOKEN` (deja dans l'environnement
-        // herite) sert d'identifiant pour l'appel.
-        let script = "#!/bin/sh\nset -e\nresponse=$(curl -sf -H \"Authorization: Bearer ${FERRFLEET_RUN_TOKEN}\" \"${FERRFLEET_API_URL}/runs/${FERRFLEET_RUN_ID}/github-token\") || exit 1\nprintf '%s' \"$response\" | sed -n 's/.*\"token\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'\n";
+        let script = include_str!("askpass.sh");
         std::fs::write(&path, script).context("ecriture du script GIT_ASKPASS")?;
         let mut perms = std::fs::metadata(&path)
             .context("lecture des permissions du script GIT_ASKPASS")?
@@ -394,5 +382,89 @@ mod tests {
             output.stdout.is_empty(),
             "le script ne doit rien imprimer (donc pas de mot de passe vide) quand curl echoue"
         );
+    }
+
+    fn askpass_with_fake_tools(curl: &str) -> (std::process::Output, String) {
+        let script = AskpassScript::create().expect("creation du script askpass");
+        let dir = std::env::temp_dir().join(format!("ferrfleet-fake-bin-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("repertoire des faux outils");
+        for (name, body) in [("curl", curl), ("sleep", "exit 0")] {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("faux outil");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("permissions du faux outil");
+        }
+        let path_var = format!(
+            "{}:{}",
+            dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let output = std::process::Command::new(&script.path)
+            .env("PATH", path_var)
+            .env("FERRFLEET_API_URL", "http://127.0.0.1:1")
+            .env("FERRFLEET_RUN_ID", "test-run")
+            .env("FERRFLEET_RUN_TOKEN", "t0ken")
+            .output()
+            .expect("lancement du script askpass");
+        let calls = std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        (output, calls)
+    }
+
+    fn scripted_curl(replies: &[(&str, &str, i32)]) -> String {
+        let cases = replies
+            .iter()
+            .enumerate()
+            .map(|(index, (body, status, code))| {
+                format!(
+                    "{}) printf '%s\\n%s' '{body}' '{status}'; exit {code};;\n",
+                    index + 1
+                )
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        format!(
+            "dir=$(dirname \"$0\")\necho x >> \"$dir/calls\"\nn=$(wc -l < \"$dir/calls\")\ncase $n in\n{cases}*) exit 22;;\nesac"
+        )
+    }
+
+    const TOKEN_BODY: &str = r#"{"token":"ghs_abc"}"#;
+
+    #[test]
+    fn askpass_script_retries_a_refused_connection_then_prints_the_token() {
+        let curl = scripted_curl(&[("", "000", 7), ("", "000", 7), (TOKEN_BODY, "200", 0)]);
+        let (output, calls) = askpass_with_fake_tools(&curl);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ghs_abc");
+        assert_eq!(calls.lines().count(), 3);
+    }
+
+    #[test]
+    fn askpass_script_retries_a_503_then_prints_the_token() {
+        let curl = scripted_curl(&[("", "503", 0), (TOKEN_BODY, "200", 0)]);
+        let (output, calls) = askpass_with_fake_tools(&curl);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ghs_abc");
+        assert_eq!(calls.lines().count(), 2);
+    }
+
+    #[test]
+    fn askpass_script_does_not_retry_a_502_or_504() {
+        for status in ["502", "504"] {
+            let curl = scripted_curl(&[("", status, 0), (TOKEN_BODY, "200", 0)]);
+            let (output, calls) = askpass_with_fake_tools(&curl);
+            assert!(!output.status.success(), "{status}");
+            assert_eq!(output.stdout, b"", "{status}");
+            assert_eq!(calls.lines().count(), 1, "{status} was retried");
+        }
+    }
+
+    #[test]
+    fn askpass_script_gives_up_on_a_persistent_503() {
+        let curl = scripted_curl(&[]).replace("*) exit 22;;", "*) printf '\\n503'; exit 0;;");
+        let (output, calls) = askpass_with_fake_tools(&curl);
+        assert!(!output.status.success());
+        assert_eq!(output.stdout, b"");
+        assert_eq!(calls.lines().count(), 5);
     }
 }
