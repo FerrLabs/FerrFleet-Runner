@@ -123,6 +123,11 @@ The Claude CLI is installed into `~/.local/bin` unless `claude` is already on
 PATH, in which case yours is used as it is. Pin it with `claude-cli-version` if
 you want a specific one on a runner that has none.
 
+The runner needs Claude Code 2.1.98 or newer, the release that added
+`--exclude-dynamic-system-prompt-sections`. It runs `claude --version` before
+starting the agent and fails the run with a message naming both versions if the
+CLI on PATH is older.
+
 `version` picks the release: a bare major such as `1` takes the newest release
 of that major, matching what `image: ...runner:1` does, and a full `1.2.3` takes
 that one exactly.
