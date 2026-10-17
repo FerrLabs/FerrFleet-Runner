@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 
 mod agent;
 mod claude_stream;
+mod claude_version;
 mod config;
 mod event_queue;
 #[cfg(test)]
@@ -1039,6 +1040,7 @@ async fn spawn_and_stream(
     git_credentials: Option<&workspace::GitCredentials>,
     stop: impl Future<Output = Lost>,
 ) -> Result<Streamed> {
+    claude_version::ensure_supported().await?;
     let mut cmd = build_claude_command(cfg, env, git_credentials)?;
     let child = cmd.spawn().context("spawning claude CLI")?;
     let timeout = Duration::from_secs(cfg.timeout_seconds);
