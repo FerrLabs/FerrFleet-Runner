@@ -17,6 +17,7 @@ mod event_queue;
 #[cfg(test)]
 mod fake_api;
 mod lease;
+mod mcp_config;
 mod retry;
 mod review_threads;
 mod sender;
@@ -611,13 +612,36 @@ mod environment_note_tests {
     }
 
     fn arg_after(cfg: &RunConfig, flag: &str) -> String {
-        let cmd = build_claude_command(cfg, &env(&cfg.working_dir), None).expect("building");
+        let (cmd, _) = build_claude_command(cfg, &env(&cfg.working_dir), None).expect("building");
         let args: Vec<_> = cmd.as_std().get_args().collect();
         let at = args
             .iter()
             .position(|a| *a == flag)
             .unwrap_or_else(|| panic!("{flag} is passed"));
         args[at + 1].to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn the_mcp_config_lives_outside_the_working_directory() {
+        let mut cfg = config(
+            "01999999-9999-7999-9999-999999999990",
+            "/workdir",
+            "abc",
+            None,
+        );
+        cfg.mcp_config = Some(serde_json::json!({"mcpServers": {}}));
+
+        let (cmd, file) =
+            build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
+
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        let at = args
+            .iter()
+            .position(|a| *a == "--mcp-config")
+            .expect("passed");
+        let path = std::path::Path::new(args[at + 1]);
+        assert!(!path.starts_with(&cfg.working_dir));
+        assert_eq!(path, file.expect("kept alive").path());
     }
 
     #[test]
@@ -628,7 +652,7 @@ mod environment_note_tests {
             "abc",
             None,
         );
-        let cmd = build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
+        let (cmd, _) = build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
 
         let removed = cmd
             .as_std()
@@ -952,7 +976,7 @@ fn build_claude_command(
     cfg: &RunConfig,
     env: &Env,
     git_credentials: Option<&workspace::GitCredentials>,
-) -> Result<Command> {
+) -> Result<(Command, Option<mcp_config::McpConfigFile>)> {
     let prompt = cfg.prompt_parts();
     let mut cmd = Command::new("claude");
     cmd.arg("-p")
@@ -1021,14 +1045,16 @@ fn build_claude_command(
         .arg(appended_system_prompt(prompt.stable))
         .arg("--exclude-dynamic-system-prompt-sections");
 
-    if let Some(mcp_config) = &cfg.mcp_config {
-        let path = std::path::Path::new(&cfg.working_dir).join(".ferrfleet-mcp.json");
-        let body = serde_json::to_string(mcp_config).context("serializing mcp config")?;
-        std::fs::write(&path, body).context("writing mcp config file")?;
-        cmd.arg("--mcp-config").arg(&path);
+    let mcp_config = cfg
+        .mcp_config
+        .as_ref()
+        .map(mcp_config::McpConfigFile::write)
+        .transpose()?;
+    if let Some(file) = &mcp_config {
+        cmd.arg("--mcp-config").arg(file.path());
     }
 
-    Ok(cmd)
+    Ok((cmd, mcp_config))
 }
 
 async fn spawn_and_stream(
@@ -1041,7 +1067,7 @@ async fn spawn_and_stream(
     stop: impl Future<Output = Lost>,
 ) -> Result<Streamed> {
     claude_version::ensure_supported().await?;
-    let mut cmd = build_claude_command(cfg, env, git_credentials)?;
+    let (mut cmd, _mcp_config) = build_claude_command(cfg, env, git_credentials)?;
     let child = cmd.spawn().context("spawning claude CLI")?;
     let timeout = Duration::from_secs(cfg.timeout_seconds);
     stream_child(child, queue, totals, session_id, timeout, stop).await
