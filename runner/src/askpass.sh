@@ -1,4 +1,8 @@
 #!/bin/sh
+case "$1" in
+  *"'https://github.com'"*|*"'https://github.com/"*|*"'https://x-access-token@github.com'"*|*"'https://x-access-token@github.com/"*) ;;
+  *) exit 1 ;;
+esac
 url="${FERRFLEET_API_URL}/runs/${FERRFLEET_RUN_ID}/github-token"
 delay=1
 attempt=1
