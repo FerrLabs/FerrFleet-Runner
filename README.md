@@ -120,8 +120,9 @@ with nothing executing it. `python3` is only warned about, because agent prompts
 are told it is there.
 
 The Claude CLI is installed into `~/.local/bin` unless `claude` is already on
-PATH, in which case yours is used as it is. Pin it with `claude-cli-version` if
-you want a specific one on a runner that has none.
+PATH, in which case yours is used as it is. It defaults to an exact version that
+Renovate bumps; override it with `claude-cli-version` if
+you want a different one on a runner that has none.
 
 The runner needs Claude Code 2.1.98 or newer, the release that added
 `--exclude-dynamic-system-prompt-sections`. It runs `claude --version` before
