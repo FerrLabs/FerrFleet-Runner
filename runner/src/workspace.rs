@@ -365,6 +365,7 @@ mod tests {
         let fake_path = format!("{}:{real_path}", fake_bin_dir.display());
 
         let output = std::process::Command::new(&script.path)
+            .arg(GITHUB_PROMPT)
             .env("PATH", fake_path)
             .env("FERRFLEET_API_URL", "http://127.0.0.1:1")
             .env("FERRFLEET_RUN_ID", "test-run")
@@ -384,7 +385,13 @@ mod tests {
         );
     }
 
+    const GITHUB_PROMPT: &str = "Password for 'https://x-access-token@github.com': ";
+
     fn askpass_with_fake_tools(curl: &str) -> (std::process::Output, String) {
+        askpass_with_prompt(curl, GITHUB_PROMPT)
+    }
+
+    fn askpass_with_prompt(curl: &str, prompt: &str) -> (std::process::Output, String) {
         let script = AskpassScript::create().expect("creation du script askpass");
         let dir = std::env::temp_dir().join(format!("ferrfleet-fake-bin-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("repertoire des faux outils");
@@ -400,6 +407,7 @@ mod tests {
             std::env::var("PATH").unwrap_or_default()
         );
         let output = std::process::Command::new(&script.path)
+            .arg(prompt)
             .env("PATH", path_var)
             .env("FERRFLEET_API_URL", "http://127.0.0.1:1")
             .env("FERRFLEET_RUN_ID", "test-run")
@@ -466,5 +474,36 @@ mod tests {
         assert!(!output.status.success());
         assert_eq!(output.stdout, b"");
         assert_eq!(calls.lines().count(), 5);
+    }
+
+    #[test]
+    fn askpass_script_answers_github_prompts() {
+        for prompt in [
+            "Password for 'https://x-access-token@github.com': ",
+            "Username for 'https://github.com': ",
+            "Password for 'https://github.com/owner/repo': ",
+        ] {
+            let curl = scripted_curl(&[(TOKEN_BODY, "200", 0)]);
+            let (output, _) = askpass_with_prompt(&curl, prompt);
+            assert!(output.status.success(), "{prompt}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ghs_abc");
+        }
+    }
+
+    #[test]
+    fn askpass_script_refuses_foreign_hosts_without_calling_the_api() {
+        for prompt in [
+            "Password for 'https://x-access-token@evil.example': ",
+            "Password for 'https://github.com.evil.example': ",
+            "Password for 'https://evil.example/github.com': ",
+            "Password for 'http://github.com': ",
+            "",
+        ] {
+            let curl = scripted_curl(&[(TOKEN_BODY, "200", 0)]);
+            let (output, calls) = askpass_with_prompt(&curl, prompt);
+            assert!(!output.status.success(), "{prompt}");
+            assert_eq!(output.stdout, b"", "{prompt}");
+            assert_eq!(calls, "", "{prompt} reached the API");
+        }
     }
 }
