@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.99-bookworm AS builder
+FROM rust:1.99-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8 AS builder
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
@@ -8,7 +8,7 @@ COPY runner ./runner
 
 RUN cargo build --release --bin ferrfleet-runner
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8 AS runtime
 
 # `image.source` is what the GHCR package page links to. Without it the package
 # keeps whatever repository first published it, which here was the private
@@ -34,7 +34,7 @@ RUN apt-get update \
 
 RUN useradd --create-home --uid 1000 --shell /bin/bash runner
 
-ARG CLAUDE_CLI_VERSION=latest
+ARG CLAUDE_CLI_VERSION=2.1.308
 ENV PATH=/home/runner/.local/bin:$PATH
 RUN su runner -c "curl -fsSL https://claude.ai/install.sh | bash -s -- '${CLAUDE_CLI_VERSION}'" \
  && /home/runner/.local/bin/claude --version
