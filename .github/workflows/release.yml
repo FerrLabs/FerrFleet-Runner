@@ -11,7 +11,6 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE: ghcr.io/ferrlabs/ferrfleet/runner
   CHART_REGISTRY: ghcr.io/ferrlabs/charts
 
 permissions:
@@ -19,8 +18,20 @@ permissions:
 
 jobs:
   publish:
-    name: Publish a signed image
+    name: Publish a signed ${{ matrix.variant }} image
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: runtime
+            image: ghcr.io/ferrlabs/ferrfleet/runner
+            description: Executes one FerrFleet agent run.
+          - variant: formal
+            image: ghcr.io/ferrlabs/ferrfleet/runner-formal
+            description: Executes one FerrFleet agent run, with a Rust toolchain and Kani for formal verification.
+    env:
+      IMAGE: ${{ matrix.image }}
     permissions:
       contents: read
       packages: write
@@ -44,7 +55,10 @@ jobs:
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
-          images: ${{ env.IMAGE }}
+          images: ${{ matrix.image }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/FerrLabs/FerrFleet-Runner
+            org.opencontainers.image.description=${{ matrix.description }}
           # A moving major tag for people who want fixes without a bump, the
           # full version for people who want to know what they pinned, and the
           # digest below for people who mean it.
@@ -56,6 +70,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
+          target: ${{ matrix.variant }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

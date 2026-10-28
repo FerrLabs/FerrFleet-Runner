@@ -143,6 +143,22 @@ jobs:
             exit 1
           }
 
+  formal-image:
+    name: Formal image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Build the image
+        run: docker build --target formal --tag ferrfleet-runner-formal:ci .
+
+      - name: The toolchain and Kani run as the runner user
+        run: |
+          set -euo pipefail
+          for cmd in "cargo --version" "cc --version" "cargo kani --version"; do
+            docker run --rm --user runner --entrypoint sh ferrfleet-runner-formal:ci -c "${cmd}"
+          done
+
   action:
     name: Action manifest
     runs-on: ubuntu-latest
