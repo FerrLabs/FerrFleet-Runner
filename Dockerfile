@@ -46,3 +46,31 @@ USER runner
 WORKDIR /workdir
 
 ENTRYPOINT ["/usr/local/bin/ferrfleet-runner"]
+
+FROM runtime AS formal
+
+LABEL org.opencontainers.image.description="Executes one FerrFleet agent run, with a Rust toolchain and Kani for formal verification."
+
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential pkg-config libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+USER runner
+ENV RUSTUP_HOME=/home/runner/.rustup \
+    CARGO_HOME=/home/runner/.cargo
+ENV PATH=/home/runner/.cargo/bin:$PATH
+ARG RUST_TOOLCHAIN=1.99.1
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path \
+      --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" --component clippy,rustfmt \
+ && cargo --version
+
+ARG KANI_VERSION=0.68.0
+RUN cargo install --locked kani-verifier --version "${KANI_VERSION}" \
+ && cargo kani setup \
+ && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
+
+WORKDIR /workdir
+
+FROM runtime AS default

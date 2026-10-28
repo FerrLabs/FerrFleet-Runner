@@ -266,6 +266,26 @@ killed before that, the heartbeats stop and FerrFleet settles the run itself
 after the lease lapses: a run not yet claimed goes back to the pool, a claimed
 one is marked failed rather than run twice.
 
+## Formal verification image
+
+`ghcr.io/ferrlabs/ferrfleet/runner-formal` is the runner image plus what an agent
+needs to verify Rust code: `build-essential`, `pkg-config`, `libssl-dev`, a
+minimal stable Rust toolchain with `clippy` and `rustfmt`, and
+[Kani](https://github.com/model-checking/kani) with its CBMC backend already
+set up. It is published with the same tags, signature, provenance and SBOM as
+the main image, and the same entrypoint.
+
+An agent selects it through the FerrFleet API with the per-agent option
+`runner_image: "formal"`. FerrFleet resolves the name through one environment
+variable per variant, `FERRFLEET_RUNNER_IMAGE_<NAME>`, for example
+`FERRFLEET_RUNNER_IMAGE_FORMAL=ghcr.io/ferrlabs/ferrfleet/runner-formal:1`.
+
+```bash
+docker build --target formal -t runner-formal .
+```
+
+A plain `docker build .` still produces the light image.
+
 ## Run a pool on Kubernetes
 
 The chart in [`charts/ferrfleet-runner`](charts/ferrfleet-runner) runs a pool with
