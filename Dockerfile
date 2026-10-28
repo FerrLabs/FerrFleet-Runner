@@ -61,8 +61,9 @@ USER runner
 ENV RUSTUP_HOME=/home/runner/.rustup \
     CARGO_HOME=/home/runner/.cargo
 ENV PATH=/home/runner/.cargo/bin:$PATH
+ARG RUST_TOOLCHAIN=1.99.1
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path \
-      --profile minimal --default-toolchain stable --component clippy,rustfmt \
+      --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" --component clippy,rustfmt \
  && cargo --version
 
 ARG KANI_VERSION=0.68.0
