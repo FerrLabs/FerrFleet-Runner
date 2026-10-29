@@ -276,8 +276,9 @@ async fn run_git(mut cmd: Command, step: &str, run: &Env) -> Result<()> {
         .with_context(|| format!("lancement de {step}"))?;
     if !output.status.success() {
         bail!(
-            "{step} a echoue avec le statut {}",
-            output.status.code().unwrap_or(-1)
+            "{step} a echoue avec le statut {}: {}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     Ok(())
@@ -285,9 +286,36 @@ async fn run_git(mut cmd: Command, step: &str, run: &Env) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AskpassScript, GitCredentials, validate_branch_name};
+    use super::{AskpassScript, GitCredentials, run_git, validate_branch_name};
+    use crate::config::Env;
     use std::os::unix::fs::PermissionsExt;
+    use tokio::process::Command;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn a_git_failure_carries_what_git_said() {
+        let env = Env {
+            api_url: "http://api".to_owned(),
+            run_id: "run".to_owned(),
+            run_token: "token".to_owned(),
+            working_dir: None,
+            runner_name: None,
+        };
+        let dir = std::env::temp_dir();
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&dir).arg("definitely-not-a-git-command");
+
+        let err = run_git(cmd, "git test", &env)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.starts_with("git test a echoue avec le statut 1"),
+            "{err}"
+        );
+        assert!(err.contains("definitely-not-a-git-command"), "{err}");
+    }
 
     #[test]
     fn validate_branch_name_rejects_leading_dash() {
