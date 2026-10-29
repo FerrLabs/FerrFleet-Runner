@@ -30,6 +30,24 @@ use event_queue::EventQueue;
 use lease::Lost;
 use sender::EventSender;
 
+const INSIDE_AGENT_VAR: &str = "FERRFLEET_INSIDE_AGENT";
+
+const RUNNER_USAGE: &str = "usage: ferrfleet-runner result '<json>' | @<file>
+       ferrfleet-runner resolve-thread <thread_id>
+       ferrfleet-runner pull-request <url>";
+
+fn check_supervisor_invocation(args: &[String], inside_agent: bool) -> Result<()> {
+    if !args.is_empty() {
+        bail!("unknown arguments {args:?}\n{RUNNER_USAGE}");
+    }
+    if inside_agent {
+        bail!(
+            "ferrfleet-runner without a subcommand starts a run; an agent cannot start one\n{RUNNER_USAGE}"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -48,6 +66,7 @@ async fn main() -> Result<()> {
         Some("dispatch") => return agent::dispatch_subcommand(&args[2..]).await,
         _ => {}
     }
+    check_supervisor_invocation(&args[1..], std::env::var_os(INSIDE_AGENT_VAR).is_some())?;
 
     let env = Env::from_env().context("loading environment")?;
     info!(run_id = %env.run_id, "starting runner");
@@ -611,6 +630,42 @@ mod environment_note_tests {
         }
     }
 
+    #[test]
+    fn the_agent_process_is_marked_so_it_cannot_start_a_run() {
+        let cfg = config(
+            "00000000-0000-0000-0000-000000000001",
+            "/workdir",
+            "abc",
+            None,
+        );
+        let (cmd, _) = build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
+        let marked = cmd
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == INSIDE_AGENT_VAR && value.is_some());
+        assert!(marked);
+    }
+
+    #[test]
+    fn only_a_bare_invocation_outside_an_agent_starts_a_run() {
+        assert!(check_supervisor_invocation(&[], false).is_ok());
+
+        let inside = check_supervisor_invocation(&[], true)
+            .unwrap_err()
+            .to_string();
+        assert!(inside.contains("an agent cannot start one"), "{inside}");
+
+        for args in [["--help"], ["help"], ["results"]] {
+            let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+            for inside_agent in [false, true] {
+                let err = check_supervisor_invocation(&args, inside_agent)
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains("usage: ferrfleet-runner result"), "{err}");
+            }
+        }
+    }
+
     fn arg_after(cfg: &RunConfig, flag: &str) -> String {
         let (cmd, _) = build_claude_command(cfg, &env(&cfg.working_dir), None).expect("building");
         let args: Vec<_> = cmd.as_std().get_args().collect();
@@ -997,6 +1052,7 @@ fn build_claude_command(
 
     load_claude_credentials(&mut cmd);
     env.apply_to(&mut cmd);
+    cmd.env(INSIDE_AGENT_VAR, "1");
 
     // Le push est fait par l'agent: `GIT_ASKPASS` va donc dans l'environnement
     // de CE sous-processus, pour que `git push` lance par l'agent
