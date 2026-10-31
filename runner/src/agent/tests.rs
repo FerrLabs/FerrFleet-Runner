@@ -9,10 +9,11 @@ use tokio::sync::watch;
 
 use super::{Agent, Ended, Mode, Timings};
 use crate::RunOutcome;
-use crate::config::{AgentConfig, PoolToken};
+use crate::config::{AgentConfig, Env, PoolToken};
 use crate::event_queue::EventQueue;
 use crate::fake_api::{FAST, FakeApi, RUN_ID, Received, Reply};
 use crate::lease::Lost;
+use crate::sender::EventSender;
 
 const POOL_TOKEN: &str = "ffrp_test_pool_token";
 const RUN_TOKEN: &str = "run-token-from-the-lease";
@@ -24,6 +25,7 @@ const TIMINGS: Timings = Timings {
     lease_timeout: Duration::from_secs(2),
     poll_retry_first: Duration::from_millis(50),
     poll_retry_max: Duration::from_millis(200),
+    dispatch_budget: Duration::from_millis(600),
     second: Duration::from_millis(20),
 };
 
@@ -607,21 +609,151 @@ async fn a_dispatch_with_a_bad_token_is_refused_with_the_message() {
 }
 
 #[tokio::test]
-async fn a_rate_limited_dispatch_is_refused_with_the_message() {
-    a_refused_dispatch_says_what_the_api_said(429, "slow down").await;
+async fn a_dispatch_rejected_as_malformed_is_not_retried() {
+    a_refused_dispatch_says_what_the_api_said(400, "head_sha does not match").await;
+}
+
+fn sha_context() -> serde_json::Value {
+    serde_json::json!({ "repo": "acme/api", "pr_number": 42, "head_sha": "0123abc" })
+}
+
+fn finishing_agent(
+    api: &FakeApi,
+) -> Agent<impl Fn(Env, EventSender) -> std::future::Ready<anyhow::Result<RunOutcome>>> {
+    Agent::new(config(api), TIMINGS, |_, _| {
+        std::future::ready(Ok(RunOutcome::Completed { exit_code: 0 }))
+    })
+}
+
+async fn dispatch_fails_then_leases(failure: u16, failures: usize) -> FakeApi {
+    let seen = AtomicUsize::new(0);
+    FakeApi::routed(move |r, _| match is_dispatch(r) {
+        true if seen.fetch_add(1, Ordering::SeqCst) < failures => Reply::status(failure),
+        true => leased(30),
+        false => Reply::status(200),
+    })
+    .await
 }
 
 #[tokio::test]
-async fn a_refusal_without_json_still_carries_the_body() {
-    let api = FakeApi::start(|_| Reply::status(503)).await;
-    let agent = Agent::new(config(&api), TIMINGS, |_, _| async {
+async fn a_dispatch_retries_a_503_until_the_api_accepts_it() {
+    let api = dispatch_fails_then_leases(503, 2).await;
+
+    let ended = finishing_agent(&api)
+        .dispatch("pr-agent", &pr_context(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(ended, Ended::RunDone);
+    assert_eq!(count(&api, is_dispatch), 3);
+}
+
+#[tokio::test]
+async fn a_dispatch_retries_a_429_until_the_api_accepts_it() {
+    let api = dispatch_fails_then_leases(429, 1).await;
+
+    let ended = finishing_agent(&api)
+        .dispatch("pr-agent", &pr_context(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(ended, Ended::RunDone);
+    assert_eq!(count(&api, is_dispatch), 2);
+}
+
+#[tokio::test]
+async fn a_dispatch_retries_while_the_api_is_unreachable() {
+    let api = FakeApi::start_later(Duration::from_millis(150), |_| leased(30));
+
+    let ended = finishing_agent(&api)
+        .dispatch("pr-agent", &pr_context(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(ended, Ended::RunDone);
+    assert_eq!(count(&api, is_dispatch), 1);
+}
+
+#[tokio::test]
+async fn a_dispatch_to_an_api_that_stays_down_gives_up_within_the_budget() {
+    let url = crate::fake_api::dead_api_url();
+    let mut cfg = config(&FakeApi::start(|_| Reply::status(200)).await);
+    cfg.api_url = url;
+    let agent = Agent::new(cfg, TIMINGS, |_, _| async {
         Ok(RunOutcome::Completed { exit_code: 0 })
     });
 
+    let started = Instant::now();
     let err = agent
         .dispatch("pr-agent", &pr_context(), None)
         .await
-        .expect_err("a 503 is an error");
+        .expect_err("a dead api cannot dispatch");
 
-    assert!(format!("{err:#}").contains("503"), "{err:#}");
+    assert!(format!("{err:#}").contains("giving up"), "{err:#}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_dispatch_retried_on_a_503_is_bounded_by_the_budget() {
+    let api = FakeApi::start(|_| Reply::status(503)).await;
+
+    let started = Instant::now();
+    let err = finishing_agent(&api)
+        .dispatch("pr-agent", &pr_context(), None)
+        .await
+        .expect_err("a 503 that never ends is an error");
+
+    let text = format!("{err:#}");
+    assert!(text.contains("503") && text.contains("giving up"), "{text}");
+    let attempts = count(&api, is_dispatch);
+    assert!((3..=8).contains(&attempts), "{attempts} attempts");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_conflict_stops_the_dispatch_with_a_clear_error() {
+    let api = dispatch_fails_then_leases(409, usize::MAX).await;
+
+    let err = finishing_agent(&api)
+        .dispatch("pr-agent", &sha_context(), None)
+        .await
+        .expect_err("a run is already in flight");
+
+    let text = format!("{err:#}");
+    assert!(text.contains("409") && text.contains("in flight"), "{text}");
+    assert_eq!(count(&api, is_dispatch), 1, "a 409 was retried");
+}
+
+#[tokio::test]
+async fn a_dispatch_without_a_commit_does_not_retry_a_500() {
+    let api = dispatch_fails_then_leases(500, 1).await;
+
+    let err = finishing_agent(&api)
+        .dispatch("pr-agent", &pr_context(), None)
+        .await
+        .expect_err("a 500 may have created the run");
+
+    assert!(format!("{err:#}").contains("500"), "{err:#}");
+    assert_eq!(count(&api, is_dispatch), 1);
+}
+
+#[tokio::test]
+async fn a_dispatch_pinned_to_a_commit_retries_a_500() {
+    let api = dispatch_fails_then_leases(500, 1).await;
+
+    let ended = finishing_agent(&api)
+        .dispatch("pr-agent", &sha_context(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(ended, Ended::RunDone);
+    assert_eq!(count(&api, is_dispatch), 2);
 }

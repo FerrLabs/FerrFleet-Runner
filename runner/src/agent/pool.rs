@@ -1,11 +1,13 @@
 use std::time::Duration;
 
-use anyhow::{Context, bail};
 use reqwest::StatusCode;
 use serde::Deserialize;
+use tokio::time::{Instant, sleep};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::config::{AgentConfig, PoolToken};
+use crate::retry::Backoff;
 
 #[derive(Deserialize)]
 pub struct Lease {
@@ -41,16 +43,18 @@ pub enum Refused {
 pub struct PoolClient {
     url: String,
     dispatch_url: String,
+    dispatch_backoff: Backoff,
     token: PoolToken,
     runner: String,
     client: reqwest::Client,
 }
 
 impl PoolClient {
-    pub fn new(config: &AgentConfig, timeout: Duration) -> Self {
+    pub fn new(config: &AgentConfig, timeout: Duration, dispatch_backoff: Backoff) -> Self {
         Self {
             url: format!("{}/runner-pools/lease", config.api_url),
             dispatch_url: format!("{}/runner-pools/dispatch", config.api_url),
+            dispatch_backoff,
             token: config.pool_token.clone(),
             runner: config.runner_name.clone(),
             client: reqwest::Client::builder()
@@ -92,24 +96,97 @@ impl PoolClient {
         agent_id: &str,
         context: &serde_json::Value,
     ) -> anyhow::Result<Lease> {
-        let resp = self
+        let pinned = pins_a_commit(context);
+        let deadline = Instant::now() + self.dispatch_backoff.budget;
+        let mut delay = self.dispatch_backoff.first_delay;
+        loop {
+            let err = match self.dispatch_once(agent_id, context, pinned).await {
+                Attempt::Done(lease) => return Ok(lease),
+                Attempt::Failed(err) => return Err(err),
+                Attempt::Retry(err) => err,
+            };
+            if Instant::now() + delay > deadline {
+                return Err(err.context("giving up on dispatching the run"));
+            }
+            warn!(?err, ?delay, "dispatch not accepted; retrying");
+            sleep(delay).await;
+            delay = (delay * 2).min(self.dispatch_backoff.max_delay);
+        }
+    }
+
+    async fn dispatch_once(
+        &self,
+        agent_id: &str,
+        context: &serde_json::Value,
+        pinned: bool,
+    ) -> Attempt {
+        let sent = self
             .client
             .post(&self.dispatch_url)
             .bearer_auth(self.token.expose())
             .json(&serde_json::json!({ "agent_id": agent_id, "context": context }))
             .send()
-            .await
-            .context("reaching FerrFleet to dispatch the run")?;
+            .await;
+        let resp = match sent {
+            Ok(resp) => resp,
+            Err(err) => {
+                let err =
+                    anyhow::Error::from(err).context("reaching FerrFleet to dispatch the run");
+                return if pinned || is_connect_failure(&err) {
+                    Attempt::Retry(err)
+                } else {
+                    Attempt::Failed(err)
+                };
+            }
+        };
         let status = resp.status();
         if status == StatusCode::OK {
-            return resp.json().await.context("decoding the dispatched run");
+            return match resp.json().await {
+                Ok(lease) => Attempt::Done(lease),
+                Err(err) => {
+                    Attempt::Failed(anyhow::Error::from(err).context("decoding the dispatched run"))
+                }
+            };
         }
         let body = resp.text().await.unwrap_or_default();
-        bail!(
-            "FerrFleet refused to dispatch a run ({status}): {}",
-            api_message(&body)
-        )
+        let message = api_message(&body);
+        if status == StatusCode::CONFLICT {
+            return Attempt::Failed(anyhow::anyhow!(
+                "FerrFleet already has a run in flight for this commit (409): {message}; not dispatching a second one"
+            ));
+        }
+        let err = anyhow::anyhow!("FerrFleet refused to dispatch a run ({status}): {message}");
+        if retryable(status, pinned) {
+            Attempt::Retry(err)
+        } else {
+            Attempt::Failed(err)
+        }
     }
+}
+
+enum Attempt {
+    Done(Lease),
+    Retry(anyhow::Error),
+    Failed(anyhow::Error),
+}
+
+fn pins_a_commit(context: &serde_json::Value) -> bool {
+    context
+        .get("head_sha")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|sha| !sha.trim().is_empty())
+}
+
+fn retryable(status: StatusCode, pinned: bool) -> bool {
+    match status {
+        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => true,
+        status => pinned && status.is_server_error(),
+    }
+}
+
+fn is_connect_failure(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<reqwest::Error>()
+        .is_some_and(reqwest::Error::is_connect)
 }
 
 fn api_message(body: &str) -> String {
