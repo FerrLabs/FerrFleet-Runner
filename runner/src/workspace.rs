@@ -202,21 +202,34 @@ async fn checkout_branch(
     if checkout.existing {
         info!(branch = %checkout.branch, "reprise de la branche existante");
 
+        let mut track_cmd = Command::new("git");
+        track_cmd
+            .current_dir(workdir)
+            .arg("remote")
+            .arg("set-branches")
+            .arg("--add")
+            .arg("origin")
+            .arg(&checkout.branch);
+        run_git(track_cmd, "git remote set-branches", run).await?;
+
         // `--` termine l'analyse des options : un nom de branche commençant
         // par `-` ne peut plus être pris pour un flag de `git fetch`.
         let mut fetch_cmd = Command::new("git");
         fetch_cmd
             .current_dir(workdir)
             .arg("fetch")
+            .arg("--depth")
+            .arg("50")
             .arg("origin")
             .arg("--")
             .arg(&checkout.branch);
         credentials.apply(&mut fetch_cmd);
         run_git(fetch_cmd, "git fetch de la branche existante", run).await?;
 
-        // Le clone met en place le refspec de suivi par défaut d'origin, donc
-        // `refs/remotes/origin/<branche>` existe déjà après le fetch
-        // ci-dessus. On le référence en forme pleinement qualifiée plutôt
+        // Un clone `--depth` ne suit que la branche par défaut : le
+        // `set-branches` ci-dessus ajoute la branche au refspec d'origin, donc
+        // `refs/remotes/origin/<branche>` existe après le fetch. On le
+        // référence en forme pleinement qualifiée plutôt
         // qu'en DWIM `git checkout <branche>` : la chaîne "refs/remotes/..."
         // ne peut jamais commencer par `-`, donc ce point de départ n'est
         // jamais ambigu avec une option, quel que soit le contenu de
@@ -286,11 +299,78 @@ async fn run_git(mut cmd: Command, step: &str, run: &Env) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AskpassScript, GitCredentials, run_git, validate_branch_name};
+    use super::{AskpassScript, GitCredentials, checkout_branch, run_git, validate_branch_name};
     use crate::config::Env;
+    use ferrfleet_shared::Checkout;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use tokio::process::Command;
     use uuid::Uuid;
+
+    fn test_env() -> Env {
+        Env {
+            api_url: "http://api".to_owned(),
+            run_id: "run".to_owned(),
+            run_token: "token".to_owned(),
+            working_dir: None,
+            runner_name: None,
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    #[tokio::test]
+    async fn an_existing_branch_is_checked_out_from_a_shallow_clone() {
+        let root = std::env::temp_dir().join(format!("ws-{}", Uuid::new_v4()));
+        let origin = root.join("origin");
+        let work = root.join("work");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        git(&origin, &["init", "-q"]);
+        git(&origin, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&origin, &["checkout", "-q", "-b", "test/fuzzing"]);
+        git(&origin, &["commit", "-q", "--allow-empty", "-m", "pr"]);
+        let pr_head = git(&origin, &["rev-parse", "HEAD"]);
+        git(&origin, &["checkout", "-q", "main"]);
+        let url = format!("file://{}", origin.display());
+        git(&work, &["clone", "-q", "--depth", "50", &url, "."]);
+
+        let checkout = Checkout {
+            repo: "o/r".to_owned(),
+            base_branch: None,
+            branch: "test/fuzzing".to_owned(),
+            existing: true,
+        };
+        let credentials = GitCredentials::create().unwrap();
+        let result = checkout_branch(&checkout, &work, &credentials, &test_env()).await;
+        let head = git(&work, &["rev-parse", "HEAD"]);
+        let branch = git(&work, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let _ = std::fs::remove_dir_all(&root);
+
+        result.expect("checkout of the existing branch");
+        assert_eq!(head, pr_head);
+        assert_eq!(branch, "test/fuzzing");
+    }
 
     #[tokio::test]
     async fn a_git_failure_carries_what_git_said() {
