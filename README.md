@@ -1,4 +1,18 @@
-# FerrFleet Runner
+<div align="center">
+
+<h1><img src=".github/logo.svg" alt="" width="48" height="48" align="absmiddle"> FerrFleet Runner</h1>
+
+**The open source process that executes one FerrFleet agent run.**
+
+Runs next to your repository and on your own Claude credential. FerrFleet itself, the control plane, is a hosted service.
+
+[![Latest release](https://img.shields.io/github/v/release/FerrLabs/FerrFleet-Runner)](https://github.com/FerrLabs/FerrFleet-Runner/releases/latest)
+[![CI](https://github.com/FerrLabs/FerrFleet-Runner/actions/workflows/ci.yml/badge.svg)](https://github.com/FerrLabs/FerrFleet-Runner/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/FerrLabs/FerrFleet-Runner)](LICENSE)
+
+[FerrLabs](https://ferrlabs.com) | [Releases](https://github.com/FerrLabs/FerrFleet-Runner/releases)
+
+</div>
 
 The process that executes one FerrFleet agent run. It is what
 `ghcr.io/ferrlabs/ferrfleet/runner` contains, and it is here in the open because
