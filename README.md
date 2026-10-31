@@ -359,11 +359,39 @@ mounts no token, because the runner never talks to the Kubernetes API.
 | `serviceAccount.create`, `.name`, `.annotations` | `true`, release name, `{}` | |
 | `nodeSelector`, `tolerations`, `affinity` | empty | |
 | `podSecurityContext`, `securityContext` | see above | |
+| `networkPolicy.enabled` | `false` | Creates a `NetworkPolicy` for the runner pods, see below. Needs a CNI that enforces them. |
+| `networkPolicy.blockedCidrs` | RFC1918, `100.64.0.0/10`, `169.254.0.0/16` | Ranges the internet egress rule excludes. Add your pod and service CIDRs if they are public ranges. |
+| `networkPolicy.extraEgress` | `[]` | More egress rules, appended as written, for instance an in-cluster proxy. |
 | `podAnnotations`, `podLabels`, `imagePullSecrets`, `fullnameOverride` | empty | |
 
 The scaler uses KEDA's `accurate` strategy: `waiting` already leaves out the runs
 a Job holds, so nothing is counted twice. Upgrading the release replaces the Job
 template without killing the Jobs already running a run.
+
+### Restricting the network
+
+Agents run with `bypassPermissions` and read PR and ticket content, so a
+prompt-injected agent has the network position of the pod. With
+`networkPolicy.enabled=true` the chart denies all ingress and allows egress only
+to DNS on port 53 and to the internet outside `networkPolicy.blockedCidrs`. That
+keeps the pod away from in-cluster services and the cloud metadata endpoint
+(`169.254.169.254`). It is off by default so existing installs keep working; it
+only takes effect on a CNI that enforces `NetworkPolicy`.
+
+If you route through a proxy inside the cluster, allow it with `extraEgress`:
+
+```yaml
+networkPolicy:
+  enabled: true
+  extraEgress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: proxy
+      ports:
+        - protocol: TCP
+          port: 3128
+```
 
 ### Which Claude credential
 

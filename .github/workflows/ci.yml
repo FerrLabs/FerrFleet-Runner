@@ -207,6 +207,12 @@ jobs:
             echo "::error::deployment mode rendered KEDA objects or an ephemeral runner"
             exit 1
           fi
+          grep -q 'kind: NetworkPolicy' rendered/deployment.yaml
+          grep -q '169.254.0.0/16' rendered/deployment.yaml
+          if grep -q 'kind: NetworkPolicy' rendered/scaledjob.yaml; then
+            echo "::error::the NetworkPolicy is not opt-in"
+            exit 1
+          fi
 
       - name: Refuse a release without a pool token
         run: |
