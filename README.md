@@ -104,14 +104,15 @@ The runner calls `POST /runner-pools/dispatch` with the agent and the event
 context, receives a run id and run token, and executes that run as a leased one:
 claim, configuration, clone, `claude`, events, result. The step exits with the
 run's status. The pool token is removed from the environment of `claude`, `git`
-and everything the agent starts. A `400`, `401`, `404` or
-`409` from the API fails the step at once with the message it sent. Connection
-errors, `429` and `503` are retried with a capped exponential backoff for up to
-10 minutes, so a FerrFleet restart does not lose the run. When the context
-carries a `head_sha`, other `5xx` answers and timeouts are retried too: if the
-first request did reach the API, the retry gets a `409` (a run for that commit
-is already in flight) and the step fails with that message instead of starting
-a second run. Without `head_sha` those ambiguous failures are not retried. `run-id` and `url` are set once the run exists.
+and everything the agent starts. A `400`, `401`, `404` or `409` from the API
+fails the step at once with the message it sent. Connection errors, `429` and
+`503` are retried with a capped exponential backoff for up to 10 minutes, so a
+FerrFleet restart does not lose the run. When the context carries a `head_sha`,
+other `5xx` answers and timeouts are retried too: if the first request did reach
+the API, the retry gets a `409` (a run for that commit is already in flight) and
+the step fails with that message instead of starting a second run. Without
+`head_sha` those ambiguous failures are not retried.
+`run-id` and `url` are set once the run exists.
 
 The same thing from a shell: `ferrfleet-runner dispatch <agent-id> '<context-json>'`
 with `FERRFLEET_API_URL` and `FERRFLEET_POOL_TOKEN` set.

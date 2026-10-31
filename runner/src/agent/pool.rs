@@ -2,12 +2,11 @@ use std::time::Duration;
 
 use reqwest::StatusCode;
 use serde::Deserialize;
-use tokio::time::{Instant, sleep};
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::config::{AgentConfig, PoolToken};
-use crate::retry::Backoff;
+use crate::retry::{Backoff, with_backoff};
 
 #[derive(Deserialize)]
 pub struct Lease {
@@ -97,20 +96,21 @@ impl PoolClient {
         context: &serde_json::Value,
     ) -> anyhow::Result<Lease> {
         let pinned = pins_a_commit(context);
-        let deadline = Instant::now() + self.dispatch_backoff.budget;
-        let mut delay = self.dispatch_backoff.first_delay;
-        loop {
-            let err = match self.dispatch_once(agent_id, context, pinned).await {
-                Attempt::Done(lease) => return Ok(lease),
-                Attempt::Failed(err) => return Err(err),
-                Attempt::Retry(err) => err,
-            };
-            if Instant::now() + delay > deadline {
-                return Err(err.context("giving up on dispatching the run"));
-            }
-            warn!(?err, ?delay, "dispatch not accepted; retrying");
-            sleep(delay).await;
-            delay = (delay * 2).min(self.dispatch_backoff.max_delay);
+        let outcome = with_backoff(
+            self.dispatch_backoff,
+            || self.dispatch_once(agent_id, context, pinned),
+            |attempt| matches!(attempt, Attempt::Retry(_)),
+            |attempt, delay| {
+                if let Attempt::Retry(err) = attempt {
+                    warn!(?err, ?delay, "dispatch not accepted; retrying");
+                }
+            },
+        )
+        .await;
+        match outcome {
+            Attempt::Done(lease) => Ok(lease),
+            Attempt::Failed(err) => Err(err),
+            Attempt::Retry(err) => Err(err.context("giving up on dispatching the run")),
         }
     }
 
@@ -150,7 +150,7 @@ impl PoolClient {
         }
         let body = resp.text().await.unwrap_or_default();
         let message = api_message(&body);
-        if status == StatusCode::CONFLICT {
+        if pinned && status == StatusCode::CONFLICT {
             return Attempt::Failed(anyhow::anyhow!(
                 "FerrFleet already has a run in flight for this commit (409): {message}; not dispatching a second one"
             ));

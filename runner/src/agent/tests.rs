@@ -733,6 +733,23 @@ async fn a_conflict_stops_the_dispatch_with_a_clear_error() {
 }
 
 #[tokio::test]
+async fn a_conflict_without_a_commit_does_not_claim_a_commit_is_in_flight() {
+    let api = dispatch_fails_then_leases(409, usize::MAX).await;
+
+    let err = finishing_agent(&api)
+        .dispatch("pr-agent", &pr_context(), None)
+        .await
+        .expect_err("the API refused the dispatch");
+
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("409") && !text.contains("this commit"),
+        "{text}"
+    );
+    assert_eq!(count(&api, is_dispatch), 1, "a 409 was retried");
+}
+
+#[tokio::test]
 async fn a_dispatch_without_a_commit_does_not_retry_a_500() {
     let api = dispatch_fails_then_leases(500, 1).await;
 
