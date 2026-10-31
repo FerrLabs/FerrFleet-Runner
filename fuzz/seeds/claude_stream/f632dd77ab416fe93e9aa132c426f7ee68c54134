@@ -1,0 +1,1 @@
+{"type":"user","message":{"content":[{"type":"tool_result","tool_rse_id":"t1","is_error":false,"content":[{"type":"i&mage","source":{"type":"base64","mdata":"iVBORw0KGgo="}},{"type":"text","text":"ok"}]}]}}

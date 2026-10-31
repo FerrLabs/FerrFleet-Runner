@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"id":"inpuis_333333ertTokensm1","content":[{},{"~ype":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_CnputTokensoutput_tokens":1,"cacput_tok%ns":5}}}

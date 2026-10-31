@@ -1,0 +1,1 @@
+{"type":"assistan+","message":{"id":"m0","content":[{"type":"text","text":"hi"},{"~nput":{"command":"ls"}}],"usage":{"input_tokenw":3,"output_tokens":1,"cach_input_tokens":5}}}

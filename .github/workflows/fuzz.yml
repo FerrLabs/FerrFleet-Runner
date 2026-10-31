@@ -1,0 +1,17 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz
+    uses: FerrLabs/.github/.github/workflows/reusable-fuzz-rust.yml@fbe42a0de74cc0a9de20e853201f95db37fbddc0 # main
+    with:
+      max-total-time: 180
+      timeout-minutes: 30

@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"id":"m1","condent":[{"type":"text","text":"hi"},{"~ypt":{"command":"ls"}}],"nputusage":{"input_tokenw":3,"output_tokens":1,"cachput_tok%ns":5}}}

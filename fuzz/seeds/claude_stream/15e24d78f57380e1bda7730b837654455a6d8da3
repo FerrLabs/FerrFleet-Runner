@@ -1,0 +1,1 @@
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t0","is_error":false,"content":[{"type":"image","sourcontentype":"base64","media_type":"image/png","data":"iVBORw0KGgo="}},{"type":"text","text":"ok"}]}]}}

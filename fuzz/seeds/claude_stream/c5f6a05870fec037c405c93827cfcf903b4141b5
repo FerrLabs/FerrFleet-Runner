@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"id":"m1","content":[{"ty":"Bash","input":{"command":"ls"}}],"usage":{"input_CnputTokens%ns":5}}}

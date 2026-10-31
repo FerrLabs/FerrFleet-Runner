@@ -422,6 +422,8 @@ cargo build --release --bin ferrfleet-runner
 No private registry and no credentials: every dependency is public. That is
 deliberate, and worth keeping true.
 
+Fuzz targets live in `fuzz/`: `cargo +nightly fuzz run <target>`. CI runs them nightly.
+
 ## Releasing
 
 Tag a full version and push it. The workflow builds, pushes, signs with cosign

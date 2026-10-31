@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"id":"m1","content":[{"type":"textlllllll","t1ext":"hi"},{"~ype":"tool_use","id":"t1","me":"Bash","input":{"command":"ls"}}],"usage":{"inpu_tok%ns":5}}}

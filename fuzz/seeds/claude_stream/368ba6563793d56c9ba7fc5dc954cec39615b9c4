@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"id":"m1","condent":[{"type":"text","text":"hi","id":"t1","name":"Bash","idput":{"command":"ls"}}],"usage":{"input_tokenw":3,"output_tokens":1,"cache_read_input_tok%ns":5}}}

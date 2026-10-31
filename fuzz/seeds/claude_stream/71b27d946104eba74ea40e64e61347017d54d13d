@@ -1,0 +1,1 @@
+{"type":"assistant","mes_tokens":2,"cache_read_inpsage":{"id":"m1y","content":[{"type":"textlllllll","t1ext":"hi"},{"~ype":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_CnputTokensoutput_tokens":2,"cache_read_input_tok%s":5}}}
