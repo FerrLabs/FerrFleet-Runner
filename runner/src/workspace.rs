@@ -229,13 +229,12 @@ async fn checkout_branch(
         // Un clone `--depth` ne suit que la branche par défaut : le
         // `set-branches` ci-dessus ajoute la branche au refspec d'origin, donc
         // `refs/remotes/origin/<branche>` existe après le fetch. On le
-        // référence en forme pleinement qualifiée plutôt
-        // qu'en DWIM `git checkout <branche>` : la chaîne "refs/remotes/..."
-        // ne peut jamais commencer par `-`, donc ce point de départ n'est
-        // jamais ambigu avec une option, quel que soit le contenu de
-        // `branche`. L'argument de `-b` n'a pas ce problème non plus : `git`
-        // consomme sans condition le jeton qui suit un flag qui attend une
-        // valeur.
+        // référence en forme pleinement qualifiée plutôt qu'en DWIM
+        // `git checkout <branche>` : la chaîne "refs/remotes/..." ne peut
+        // jamais commencer par `-`, donc ce point de départ n'est jamais
+        // ambigu avec une option, quel que soit le contenu de `branche`.
+        // L'argument de `-b` n'a pas ce problème non plus : `git` consomme
+        // sans condition le jeton qui suit un flag qui attend une valeur.
         let mut checkout_cmd = Command::new("git");
         checkout_cmd
             .current_dir(workdir)
@@ -339,9 +338,25 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
 
+    struct TempRoot(std::path::PathBuf);
+
+    impl std::ops::Deref for TempRoot {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[tokio::test]
     async fn an_existing_branch_is_checked_out_from_a_shallow_clone() {
-        let root = std::env::temp_dir().join(format!("ws-{}", Uuid::new_v4()));
+        let root = TempRoot(std::env::temp_dir().join(format!("ws-{}", Uuid::new_v4())));
         let origin = root.join("origin");
         let work = root.join("work");
         std::fs::create_dir_all(&origin).unwrap();
@@ -362,14 +377,15 @@ mod tests {
             existing: true,
         };
         let credentials = GitCredentials::create().unwrap();
-        let result = checkout_branch(&checkout, &work, &credentials, &test_env()).await;
-        let head = git(&work, &["rev-parse", "HEAD"]);
-        let branch = git(&work, &["rev-parse", "--abbrev-ref", "HEAD"]);
-        let _ = std::fs::remove_dir_all(&root);
+        checkout_branch(&checkout, &work, &credentials, &test_env())
+            .await
+            .expect("checkout of the existing branch");
 
-        result.expect("checkout of the existing branch");
-        assert_eq!(head, pr_head);
-        assert_eq!(branch, "test/fuzzing");
+        assert_eq!(git(&work, &["rev-parse", "HEAD"]), pr_head);
+        assert_eq!(
+            git(&work, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "test/fuzzing"
+        );
     }
 
     #[tokio::test]
