@@ -17,3 +17,13 @@ tolerations:
 extraEnv:
   - name: HTTPS_PROXY
     value: http://proxy.internal:3128
+networkPolicy:
+  enabled: true
+  extraEgress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: proxy
+      ports:
+        - protocol: TCP
+          port: 3128
