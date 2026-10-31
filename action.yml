@@ -50,7 +50,7 @@ inputs:
       Claude Code CLI version installed in `binary` mode. Ignored when `claude`
       is already on PATH, which is how a self-hosted runner pins its own.
     required: false
-    default: '2.1.311'
+    default: '2.1.314'
 
 outputs:
   run-id:
