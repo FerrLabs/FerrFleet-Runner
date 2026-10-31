@@ -1,1 +1,0 @@
-{"type":"assistant","message":{"id":"inpum1","content":[{"type":"tent","text":"hi"},{"~ype":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokenw":3,"output_tokens":1,"cacread_inputketos_n":5}}}

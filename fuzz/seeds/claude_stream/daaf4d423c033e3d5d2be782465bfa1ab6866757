@@ -1,1 +1,0 @@
-{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"hi"},{"type":"tool_use","di":"t2","mnae":"Bash","inpuOt":{"command":"ls"}}],"usage":{"input_read_input_tokens":5}}}

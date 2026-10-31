@@ -1,1 +1,0 @@
-{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"hi"},{"~ype":"tool_use","id":"t1","name":"Bash","input":{}}],"usage":{"input_te_read_kens":5}}}

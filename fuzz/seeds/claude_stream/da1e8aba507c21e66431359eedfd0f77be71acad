@@ -1,1 +1,0 @@
-{"type":"assistant","message":{"id":"m1y","contentg":[{"type":"textLllllll","t1ext":"hi"},{"~ype":"tool_u&se","id":"t1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_Cnpuens":2,"cache_read_input_tok%s":5}}}
