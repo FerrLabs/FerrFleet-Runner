@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.99-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8 AS builder
+FROM rust:1.99-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b AS builder
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
@@ -8,7 +8,7 @@ COPY runner ./runner
 
 RUN cargo build --release --bin ferrfleet-runner
 
-FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8 AS runtime
+FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS runtime
 
 # `image.source` is what the GHCR package page links to. Without it the package
 # keeps whatever repository first published it, which here was the private
