@@ -44,16 +44,26 @@ pub struct Timings {
     pub lease_timeout: Duration,
     pub poll_retry_first: Duration,
     pub poll_retry_max: Duration,
+    pub dispatch_budget: Duration,
     pub second: Duration,
 }
 
 impl Timings {
+    fn dispatch_backoff(&self) -> Backoff {
+        Backoff {
+            first_delay: self.poll_retry_first,
+            max_delay: self.poll_retry_max,
+            budget: self.dispatch_budget,
+        }
+    }
+
     pub const PRODUCTION: Self = Self {
         api: Backoff::API_REDEPLOY,
         api_timeout: EventSender::TIMEOUT,
         lease_timeout: Duration::from_secs(60),
         poll_retry_first: Duration::from_secs(1),
         poll_retry_max: Duration::from_secs(30),
+        dispatch_budget: Duration::from_secs(10 * 60),
         second: Duration::from_secs(1),
     };
 }
@@ -137,7 +147,7 @@ where
 {
     pub fn new(config: AgentConfig, timings: Timings, execute: X) -> Self {
         Self {
-            pool: PoolClient::new(&config, timings.lease_timeout),
+            pool: PoolClient::new(&config, timings.lease_timeout, timings.dispatch_backoff()),
             config,
             timings,
             execute,

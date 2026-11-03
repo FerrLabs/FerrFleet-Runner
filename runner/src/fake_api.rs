@@ -53,6 +53,13 @@ impl Reply {
         }
     }
 
+    pub fn text(status: u16, body: &str) -> Self {
+        Self {
+            body: body.to_owned(),
+            ..Self::status(status)
+        }
+    }
+
     pub fn after(self, delay: Duration) -> Self {
         Self { delay, ..self }
     }
