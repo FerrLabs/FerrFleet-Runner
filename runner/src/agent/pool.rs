@@ -96,9 +96,14 @@ impl PoolClient {
         context: &serde_json::Value,
     ) -> anyhow::Result<Lease> {
         let pinned = pins_a_commit(context);
+        let mut retrying = false;
         let outcome = with_backoff(
             self.dispatch_backoff,
-            || self.dispatch_once(agent_id, context, pinned),
+            || {
+                let attempt = self.dispatch_once(agent_id, context, pinned, retrying);
+                retrying = true;
+                attempt
+            },
             |attempt| matches!(attempt, Attempt::Retry(_)),
             |attempt, delay| {
                 if let Attempt::Retry(err) = attempt {
@@ -119,6 +124,7 @@ impl PoolClient {
         agent_id: &str,
         context: &serde_json::Value,
         pinned: bool,
+        retrying: bool,
     ) -> Attempt {
         let sent = self
             .client
@@ -150,6 +156,11 @@ impl PoolClient {
         }
         let body = resp.text().await.unwrap_or_default();
         let message = api_message(&body);
+        if pinned && status == StatusCode::CONFLICT && retrying {
+            return Attempt::Failed(anyhow::anyhow!(
+                "FerrFleet has a run in flight for this commit (409): {message}; it is most likely the one an earlier attempt created before its answer was lost, and it is reaped when its lease expires"
+            ));
+        }
         if pinned && status == StatusCode::CONFLICT {
             return Attempt::Failed(anyhow::anyhow!(
                 "FerrFleet already has a run in flight for this commit (409): {message}; not dispatching a second one"

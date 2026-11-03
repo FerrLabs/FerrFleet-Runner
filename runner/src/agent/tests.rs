@@ -609,6 +609,29 @@ async fn a_dispatch_with_a_bad_token_is_refused_with_the_message() {
 }
 
 #[tokio::test]
+async fn a_refusal_without_json_still_carries_the_body() {
+    let api = FakeApi::routed(|r, _| {
+        if is_dispatch(r) {
+            Reply::text(404, "no route for this pool")
+        } else {
+            Reply::status(200)
+        }
+    })
+    .await;
+
+    let err = finishing_agent(&api)
+        .dispatch("pr-agent", &pr_context(), None)
+        .await
+        .expect_err("a 404 is an error");
+
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("404") && text.contains("no route for this pool"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
 async fn a_dispatch_rejected_as_malformed_is_not_retried() {
     a_refused_dispatch_says_what_the_api_said(400, "head_sha does not match").await;
 }
@@ -730,6 +753,26 @@ async fn a_conflict_stops_the_dispatch_with_a_clear_error() {
     let text = format!("{err:#}");
     assert!(text.contains("409") && text.contains("in flight"), "{text}");
     assert_eq!(count(&api, is_dispatch), 1, "a 409 was retried");
+}
+
+#[tokio::test]
+async fn a_conflict_after_a_retry_points_at_the_run_our_first_attempt_created() {
+    let seen = AtomicUsize::new(0);
+    let api = FakeApi::routed(move |r, _| match is_dispatch(r) {
+        true if seen.fetch_add(1, Ordering::SeqCst) == 0 => Reply::status(500),
+        true => Reply::status(409),
+        false => Reply::status(200),
+    })
+    .await;
+
+    let err = finishing_agent(&api)
+        .dispatch("pr-agent", &sha_context(), None)
+        .await
+        .expect_err("the run exists but its lease was lost");
+
+    let text = format!("{err:#}");
+    assert!(text.contains("earlier attempt"), "{text}");
+    assert_eq!(count(&api, is_dispatch), 2);
 }
 
 #[tokio::test]
