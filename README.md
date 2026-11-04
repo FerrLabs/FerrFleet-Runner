@@ -50,7 +50,7 @@ Everything it needs arrives at startup:
 | `FERRFLEET_RUN_ID` | yes | The run to execute. |
 | `FERRFLEET_RUN_TOKEN` | yes | Scoped to that one run, and expiring with it. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | yes | Yours. Without it the agent starts and does nothing. |
-| `CLAUDE_ENV_FILE` | no | A credentials file to read instead, as our own pods use. |
+| `CLAUDE_ENV_FILE` | no | A KEY=VALUE credentials file loaded into the environment of `claude`. Defaults to `/vault/secrets/claude.env`; our own deployments inject the token above instead. |
 
 It holds no credential of its own. The GitHub token it pushes with is minted
 per run by the API, scoped to that run's repository, and fetched at the moment
