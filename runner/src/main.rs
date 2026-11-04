@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tracing::{error, info, warn};
 
@@ -18,6 +18,7 @@ mod event_queue;
 mod fake_api;
 mod lease;
 mod mcp_config;
+mod private_file;
 mod retry;
 mod review_threads;
 mod sender;
@@ -28,6 +29,7 @@ use claude_stream::{reopens_current_session, translate};
 use config::Env;
 use event_queue::EventQueue;
 use lease::Lost;
+use private_file::PrivateFile;
 use sender::EventSender;
 
 const INSIDE_AGENT_VAR: &str = "FERRFLEET_INSIDE_AGENT";
@@ -261,7 +263,7 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<RunO
         Err(err) => {
             warn!(?err, "claude execution failed");
             queue.push(ExecutorEvent::Error {
-                message: format!("claude execution failed: {err}"),
+                message: format!("claude execution failed: {err:#}"),
                 provider_signal: false,
                 timestamp: Utc::now(),
             });
@@ -404,12 +406,10 @@ const REPO_CONTEXT_DIR: &str = ".ferrfleet";
 
 /// Most a repository may contribute to one prompt.
 ///
-/// The whole prompt goes to `claude` as a single `argv` entry, and Linux caps
-/// one entry at 128 KiB (`MAX_ARG_STRLEN`). Past that the exec fails outright,
-/// with an error naming neither this file nor the repository that grew it. The
-/// canonical prompt, the writing rules and the event context share that budget,
-/// so a quarter of it is a generous ceiling for a description of an application
-/// and still leaves the failure impossible to reach.
+/// The prompt reaches `claude` on stdin, so the kernel's argv limits do not
+/// apply to it. It still shares the model's context window with the canonical
+/// prompt, the writing rules and the event context, so a repository's own
+/// description is capped to a fraction of what a run can carry.
 const MAX_REPO_CONTEXT_BYTES: usize = 32 * 1024;
 
 /// The agent's prompt, plus whatever the repository has to say to this agent.
@@ -638,8 +638,10 @@ mod environment_note_tests {
             "abc",
             None,
         );
-        let (cmd, _) = build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
-        let marked = cmd
+        let invocation =
+            build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
+        let marked = invocation
+            .command
             .as_std()
             .get_envs()
             .any(|(key, value)| key == INSIDE_AGENT_VAR && value.is_some());
@@ -666,14 +668,37 @@ mod environment_note_tests {
         }
     }
 
-    fn arg_after(cfg: &RunConfig, flag: &str) -> String {
-        let (cmd, _) = build_claude_command(cfg, &env(&cfg.working_dir), None).expect("building");
-        let args: Vec<_> = cmd.as_std().get_args().collect();
+    fn stdin_prompt(cfg: &RunConfig) -> String {
+        build_claude_command(cfg, &env(&cfg.working_dir), None)
+            .expect("building")
+            .stdin_prompt
+    }
+
+    fn system_prompt(cfg: &RunConfig) -> String {
+        let invocation = build_claude_command(cfg, &env(&cfg.working_dir), None).expect("building");
+        let args: Vec<_> = invocation.command.as_std().get_args().collect();
+        assert!(!args.iter().any(|a| *a == "--append-system-prompt"));
         let at = args
             .iter()
-            .position(|a| *a == flag)
-            .unwrap_or_else(|| panic!("{flag} is passed"));
-        args[at + 1].to_string_lossy().into_owned()
+            .position(|a| *a == "--append-system-prompt-file")
+            .expect("the system prompt is passed as a file");
+        std::fs::read_to_string(args[at + 1]).expect("reading the system prompt file")
+    }
+
+    #[test]
+    fn the_prompt_is_not_an_argument() {
+        let cfg = config(
+            "01999999-9999-7999-9999-999999999993",
+            "/workdir",
+            "abc",
+            Some(STABLE),
+        );
+        let invocation =
+            build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
+        let args: Vec<_> = invocation.command.as_std().get_args().collect();
+
+        assert!(args.contains(&std::ffi::OsStr::new("-p")));
+        assert!(args.iter().all(|a| a.len() < 512));
     }
 
     #[test]
@@ -686,17 +711,17 @@ mod environment_note_tests {
         );
         cfg.mcp_config = Some(serde_json::json!({"mcpServers": {}}));
 
-        let (cmd, file) =
+        let invocation =
             build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
 
-        let args: Vec<_> = cmd.as_std().get_args().collect();
+        let args: Vec<_> = invocation.command.as_std().get_args().collect();
         let at = args
             .iter()
             .position(|a| *a == "--mcp-config")
             .expect("passed");
         let path = std::path::Path::new(args[at + 1]);
         assert!(!path.starts_with(&cfg.working_dir));
-        assert_eq!(path, file.expect("kept alive").path());
+        assert_eq!(path, invocation.mcp_config.expect("kept alive").path());
     }
 
     #[test]
@@ -707,7 +732,9 @@ mod environment_note_tests {
             "abc",
             None,
         );
-        let (cmd, _) = build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
+        let invocation =
+            build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
+        let cmd = invocation.command;
 
         let removed = cmd
             .as_std()
@@ -732,9 +759,9 @@ mod environment_note_tests {
             Some(STABLE),
         );
 
-        let system = arg_after(&first, "--append-system-prompt");
+        let system = system_prompt(&first);
 
-        assert_eq!(system, arg_after(&second, "--append-system-prompt"));
+        assert_eq!(system, system_prompt(&second));
         assert!(system.starts_with(STABLE));
         for per_run in ["1111111", "ferrfleet-workdir", "999999991", "Event context"] {
             assert!(
@@ -753,7 +780,7 @@ mod environment_note_tests {
             Some(STABLE),
         );
 
-        let user = arg_after(&cfg, "-p");
+        let user = stdin_prompt(&cfg);
 
         assert!(user.starts_with("## Event context"));
         assert!(user.contains("1111111"));
@@ -769,11 +796,8 @@ mod environment_note_tests {
             None,
         );
 
-        assert_eq!(arg_after(&cfg, "-p"), cfg.prompt);
-        assert_eq!(
-            arg_after(&cfg, "--append-system-prompt"),
-            RUNNER_ENVIRONMENT_NOTE
-        );
+        assert_eq!(stdin_prompt(&cfg), cfg.prompt);
+        assert_eq!(system_prompt(&cfg), RUNNER_ENVIRONMENT_NOTE);
     }
 
     #[test]
@@ -893,9 +917,8 @@ mod repo_context_tests {
         assert!(out.contains("the instructions win"));
     }
 
-    /// The prompt is one argv entry with a 128 KiB kernel limit, so an
-    /// unbounded file turns into an exec failure naming neither the file nor
-    /// the repository.
+    /// An unbounded file would crowd the agent's instructions and the event
+    /// context out of the model's context window.
     #[test]
     fn an_oversized_file_is_cut_and_says_so() {
         let dir = temp_dir("oversized");
@@ -1031,22 +1054,15 @@ fn build_claude_command(
     cfg: &RunConfig,
     env: &Env,
     git_credentials: Option<&workspace::GitCredentials>,
-) -> Result<(Command, Option<mcp_config::McpConfigFile>)> {
+) -> Result<ClaudeInvocation> {
     let prompt = cfg.prompt_parts();
     let mut cmd = Command::new("claude");
     cmd.arg("-p")
-        // A run without a checkout has no repository, so there is nothing for
-        // one to have stated. Announcing an absent file there would answer a
-        // question nobody asked, about a repository that does not exist.
-        .arg(if cfg.checkout.is_some() {
-            prompt_with_repo_context(prompt.per_run, &cfg.agent_id, &cfg.working_dir)
-        } else {
-            prompt.per_run.to_owned()
-        })
         .arg("--output-format")
         .arg("stream-json")
         .arg("--verbose")
         .current_dir(&cfg.working_dir)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -1097,20 +1113,52 @@ fn build_claude_command(
     // authenticating it would route around the connector's denied-tool list,
     // but a runner we do not build may have it, so the note forbids it rather
     // than claiming it is absent.
-    cmd.arg("--append-system-prompt")
-        .arg(appended_system_prompt(prompt.stable))
+    let system_prompt_file = PrivateFile::write(
+        "system-prompt",
+        appended_system_prompt(prompt.stable).as_bytes(),
+    )?;
+    cmd.arg("--append-system-prompt-file")
+        .arg(system_prompt_file.path())
         .arg("--exclude-dynamic-system-prompt-sections");
 
-    let mcp_config = cfg
-        .mcp_config
-        .as_ref()
-        .map(mcp_config::McpConfigFile::write)
-        .transpose()?;
+    let mcp_config = cfg.mcp_config.as_ref().map(mcp_config::write).transpose()?;
     if let Some(file) = &mcp_config {
         cmd.arg("--mcp-config").arg(file.path());
     }
 
-    Ok((cmd, mcp_config))
+    // A run without a checkout has no repository, so there is nothing for
+    // one to have stated. Announcing an absent file there would answer a
+    // question nobody asked, about a repository that does not exist.
+    let stdin_prompt = if cfg.checkout.is_some() {
+        prompt_with_repo_context(prompt.per_run, &cfg.agent_id, &cfg.working_dir)
+    } else {
+        prompt.per_run.to_owned()
+    };
+
+    Ok(ClaudeInvocation {
+        command: cmd,
+        stdin_prompt,
+        system_prompt_file,
+        mcp_config,
+    })
+}
+
+struct ClaudeInvocation {
+    command: Command,
+    stdin_prompt: String,
+    system_prompt_file: PrivateFile,
+    mcp_config: Option<PrivateFile>,
+}
+
+fn spawn_with_prompt(mut command: Command, prompt: String) -> Result<Child> {
+    let mut child = command.spawn().context("spawning claude CLI")?;
+    let mut stdin = child.stdin.take().context("claude stdin missing")?;
+    tokio::spawn(async move {
+        if let Err(err) = stdin.write_all(prompt.as_bytes()).await {
+            warn!(%err, "could not write the prompt to claude");
+        }
+    });
+    Ok(child)
 }
 
 async fn spawn_and_stream(
@@ -1123,8 +1171,13 @@ async fn spawn_and_stream(
     stop: impl Future<Output = Lost>,
 ) -> Result<Streamed> {
     claude_version::ensure_supported().await?;
-    let (mut cmd, _mcp_config) = build_claude_command(cfg, env, git_credentials)?;
-    let child = cmd.spawn().context("spawning claude CLI")?;
+    let ClaudeInvocation {
+        command,
+        stdin_prompt,
+        system_prompt_file: _system_prompt_file,
+        mcp_config: _mcp_config,
+    } = build_claude_command(cfg, env, git_credentials)?;
+    let child = spawn_with_prompt(command, stdin_prompt)?;
     let timeout = Duration::from_secs(cfg.timeout_seconds);
     stream_child(child, queue, totals, session_id, timeout, stop).await
 }
@@ -1225,6 +1278,70 @@ async fn stream_child(
 
     let _ = stderr_task.await;
     Ok(Streamed::Exited(exit_code))
+}
+
+#[cfg(test)]
+mod stdin_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    const OVER_ARG_MAX_STRLEN: usize = 300 * 1024;
+
+    fn stub(script: &str) -> (Command, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("ferrfleet-stub-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("writing the stub");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("making the stub executable");
+        let mut command = Command::new(&path);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        (command, path)
+    }
+
+    #[tokio::test]
+    async fn a_prompt_over_the_argv_limit_reaches_the_child_whole() {
+        let (command, path) = stub("wc -c");
+        let prompt = "x".repeat(OVER_ARG_MAX_STRLEN);
+
+        let child = spawn_with_prompt(command, prompt).expect("spawning");
+        let output = child.wait_with_output().await.expect("waiting");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            OVER_ARG_MAX_STRLEN.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_that_never_reads_its_prompt_does_not_hang_the_runner() {
+        let (command, path) = stub("echo done");
+        let prompt = "x".repeat(OVER_ARG_MAX_STRLEN);
+
+        let child = spawn_with_prompt(command, prompt).expect("spawning");
+        let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+            .await
+            .expect("the child is not stuck")
+            .expect("waiting");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "done");
+    }
+
+    #[test]
+    fn a_failed_spawn_names_the_cause_in_the_reported_error() {
+        let err = spawn_with_prompt(
+            Command::new("/nonexistent/ferrfleet-claude"),
+            "prompt".to_owned(),
+        )
+        .expect_err("there is no such binary");
+
+        let message = format!("claude execution failed: {err:#}");
+        assert!(message.contains("spawning claude CLI"), "{message}");
+        assert!(message.contains("No such file or directory"), "{message}");
+    }
 }
 
 #[cfg(test)]

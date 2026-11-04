@@ -31,8 +31,10 @@ prompt, streams the events back as they happen, and reports the result.
 The prompt is split so it caches across runs. When the configuration carries a
 `stable_prefix` that `prompt` starts with, that prefix (the agent's own
 instructions, the same on every run of the agent) goes into the system prompt
-through `--append-system-prompt`, and only the rest of `prompt` (the event
-context, the diff, the repository context) is the `-p` turn. The environment note
+through `--append-system-prompt-file`, and only the rest of `prompt` (the event
+context, the diff, the repository context) is the `-p` turn, written to the
+CLI's stdin. Neither goes through `argv`, whose per-argument cap (128 KiB on
+Linux) a large pull request would exceed. The environment note
 appended after it holds no per-run value, and `--exclude-dynamic-system-prompt-sections`
 keeps the auto memory path, which follows the working directory, out of the
 system prompt. Two runs of the same agent therefore send a byte-identical system
