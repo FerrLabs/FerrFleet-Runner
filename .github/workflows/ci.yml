@@ -151,6 +151,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: The memory cap logic
+        run: tests/cbmc_limit.sh
+
       - name: Build the image
         run: docker build --target formal --tag ferrfleet-runner-formal:ci .
 

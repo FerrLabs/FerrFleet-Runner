@@ -315,14 +315,23 @@ getting the whole pod OOMKilled. The `cbmc` in Kani's bundle directory is replac
 by a wrapper that execs the original (`cbmc.real`), so it applies however Kani is
 invoked. `cargo` and `rustc` are not capped.
 
-The cap is `KANI_MEMORY_LIMIT` (bytes, or with a `K`, `M` or `G` suffix). When
-unset it is the cgroup memory limit minus 2GiB (6GiB in an 8Gi pod), or 6GiB when
-the pod has no limit.
+The cap is `KANI_MEMORY_LIMIT`: digits with an optional `K`, `M` or `G` suffix, or
+the Kubernetes `Ki`, `Mi`, `Gi` (binary units, so `6G` and `6Gi` are the same).
+Zero, negative, decimal, other suffixes and anything above 1TiB are rejected: the
+wrapper prints a message on stderr and exits 2 without running `cbmc`.
 
-A harness over the cap fails that `cargo kani` invocation with a CBMC out of
-memory error (`std::bad_alloc` or a failed allocation) and a non-zero exit. The
-agent should report it as not verified (memory budget exceeded) and carry on with
-the other harnesses.
+When it is unset, the cap is derived from the pod's memory limit, read from cgroup
+v2 (`/sys/fs/cgroup/memory.max`) or else cgroup v1
+(`/sys/fs/cgroup/memory/memory.limit_in_bytes`, ignored when at or above the node's
+`MemTotal`): 3/4 of the limit up to 8GiB (6GiB in an 8Gi pod), the limit minus 2GiB
+above that. With no limit at all it is 6GiB.
+
+A harness over the cap fails that `cargo kani` invocation with a non-zero exit
+(allocation failure or signal; at very small caps `cbmc` can die with SIGSEGV
+instead of a clean error). The agent should report it as not verified (memory
+budget exceeded) and carry on with the other harnesses.
+
+`tests/cbmc_limit.sh` checks the cap derivation and the override parsing.
 
 ## Run a pool on Kubernetes
 
