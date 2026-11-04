@@ -63,13 +63,12 @@ outputs:
 runs:
   using: composite
   steps:
-    - id: install
-      name: Install the runner
+    - id: resolve
+      name: Resolve the runner release
       if: inputs.mode == 'binary'
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
-        CLAUDE_CLI_VERSION: ${{ inputs.claude-cli-version }}
         GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
@@ -131,32 +130,80 @@ runs:
           }
         fi
 
+        {
+          echo "tag=${tag}"
+          echo "target=${target}"
+          if command -v claude >/dev/null; then
+            echo "claude-on-path=true"
+          else
+            echo "claude-on-path=false"
+          fi
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Restore the runner binary
+      if: inputs.mode == 'binary'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/ferrfleet-runner/bin
+        key: ferrfleet-runner-${{ steps.resolve.outputs.tag }}-${{ steps.resolve.outputs.target }}
+
+    - name: Restore the Claude CLI
+      if: inputs.mode == 'binary' && steps.resolve.outputs.claude-on-path == 'false'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.local/share/claude/versions/${{ inputs.claude-cli-version }}
+        key: claude-cli-${{ inputs.claude-cli-version }}-${{ runner.os }}-${{ runner.arch }}
+
+    - id: install
+      name: Install the runner
+      if: inputs.mode == 'binary'
+      shell: bash
+      env:
+        TAG: ${{ steps.resolve.outputs.tag }}
+        TARGET: ${{ steps.resolve.outputs.target }}
+        CLAUDE_ON_PATH: ${{ steps.resolve.outputs.claude-on-path }}
+        CLAUDE_CLI_VERSION: ${{ inputs.claude-cli-version }}
+      run: |
+        set -euo pipefail
+
         dir="${RUNNER_TEMP}/ferrfleet-runner"
-        asset="ferrfleet-runner-${target}.tar.gz"
-        mkdir -p "${dir}/bin"
-        base="https://github.com/${repo}/releases/download/${tag}"
+        asset="ferrfleet-runner-${TARGET}.tar.gz"
 
-        curl -fsSL -o "${dir}/${asset}" "${base}/${asset}"
-        curl -fsSL -o "${dir}/checksums.txt" "${base}/checksums.txt"
+        if [ -x "${dir}/bin/ferrfleet-runner" ]; then
+          echo "Using the cached ferrfleet-runner ${TAG} (${TARGET})"
+        else
+          mkdir -p "${dir}/bin"
+          base="https://github.com/FerrLabs/FerrFleet-Runner/releases/download/${TAG}"
 
-        ( cd "${dir}" && grep -F " ${asset}" checksums.txt | sha256sum --check --strict - ) || {
-          echo "::error::${asset} does not match its published checksum."
-          exit 1
-        }
+          curl -fsSL -o "${dir}/${asset}" "${base}/${asset}"
+          curl -fsSL -o "${dir}/checksums.txt" "${base}/checksums.txt"
 
-        tar -xzf "${dir}/${asset}" -C "${dir}/bin" ferrfleet-runner
-        chmod +x "${dir}/bin/ferrfleet-runner"
+          ( cd "${dir}" && grep -F " ${asset}" checksums.txt | sha256sum --check --strict - ) || {
+            echo "::error::${asset} does not match its published checksum."
+            exit 1
+          }
+
+          tar -xzf "${dir}/${asset}" -C "${dir}/bin" ferrfleet-runner
+          chmod +x "${dir}/bin/ferrfleet-runner"
+          echo "Installed ferrfleet-runner ${TAG} (${TARGET})"
+        fi
 
         echo "runner=${dir}/bin/ferrfleet-runner" >> "${GITHUB_OUTPUT}"
-        echo "Installed ferrfleet-runner ${tag} (${target})"
 
-        if command -v claude >/dev/null; then
+        if [ "${CLAUDE_ON_PATH}" = true ]; then
           echo "Using the Claude CLI already on this runner: $(claude --version)"
+          exit 0
+        fi
+
+        cached="${HOME}/.local/share/claude/versions/${CLAUDE_CLI_VERSION}"
+        if [ -x "${cached}" ]; then
+          mkdir -p "${HOME}/.local/bin"
+          ln -sfn "${cached}" "${HOME}/.local/bin/claude"
         else
           curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CLI_VERSION}"
-          "${HOME}/.local/bin/claude" --version
-          echo "claude-bin=${HOME}/.local/bin" >> "${GITHUB_OUTPUT}"
         fi
+        "${HOME}/.local/bin/claude" --version
+        echo "claude-bin=${HOME}/.local/bin" >> "${GITHUB_OUTPUT}"
 
     # Creating the run and executing it are one step on purpose. The run token
     # authenticates the container, and passing it between steps would mean
@@ -176,6 +223,7 @@ runs:
         FERRFLEET_RUNNER_BIN: ${{ steps.install.outputs.runner }}
         CLAUDE_CLI_BIN: ${{ steps.install.outputs.claude-bin }}
         CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-token }}
+        DISABLE_AUTOUPDATER: '1'
       run: |
         set -euo pipefail
         case "${MODE}" in
