@@ -27,9 +27,12 @@ to_bytes() {
   esac
   case "$1" in
     *[0-9]) digits=$1; mult=1 ;;
-    *[Kk]|*[Kk]i) digits=${1%%[Kk]*}; mult=1024 ;;
-    *[Mm]|*[Mm]i) digits=${1%%[Mm]*}; mult=$((1024 * 1024)) ;;
-    *[Gg]|*[Gg]i) digits=${1%%[Gg]*}; mult=$gib ;;
+    *[Kk]) digits=${1%?}; mult=1024 ;;
+    *[Kk]i) digits=${1%??}; mult=1024 ;;
+    *[Mm]) digits=${1%?}; mult=$((1024 * 1024)) ;;
+    *[Mm]i) digits=${1%??}; mult=$((1024 * 1024)) ;;
+    *[Gg]) digits=${1%?}; mult=$gib ;;
+    *[Gg]i) digits=${1%??}; mult=$gib ;;
     *) die "invalid KANI_MEMORY_LIMIT '$1'" ;;
   esac
   case "$digits" in

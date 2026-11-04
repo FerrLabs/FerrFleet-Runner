@@ -85,7 +85,7 @@ for pair in "200M:$((200 << 20))" "200m:$((200 << 20))" "6G:$((6 * gib))" "6Gi:$
             "1024G:$((1024 * gib))"; do
   expect_cap "override ${pair%%:*}" "${pair#*:}" KANI_MEMORY_LIMIT="${pair%%:*}"
 done
-for bad in 0 00 0G -1 -1G +1 1.5G 6GB 6B G Gi ki abc "6 G" 99999999999G 1025G 99999999999999999999 1GiB; do
+for bad in 0 00 0G -1 -1G +1 1.5G 6GB 6B G Gi ki abc "6 G" 99999999999G 1025G 99999999999999999999 1GiB 1kK 1Gg 1GG 1G2G 6KiK 1Kik 1mM 654m1M; do
   expect_reject "override '${bad}'" KANI_MEMORY_LIMIT="${bad}"
 done
 

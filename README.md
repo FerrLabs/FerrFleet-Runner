@@ -326,6 +326,10 @@ v2 (`/sys/fs/cgroup/memory.max`) or else cgroup v1
 `MemTotal`): 3/4 of the limit up to 8GiB (6GiB in an 8Gi pod), the limit minus 2GiB
 above that. With no limit at all it is 6GiB.
 
+The cap applies to each `cbmc` process, not to the pod. Kani checks harnesses one
+at a time by default; with `--jobs N`, N processes can each reach the cap, so set
+`KANI_MEMORY_LIMIT` to the per-job budget.
+
 A harness over the cap fails that `cargo kani` invocation with a non-zero exit
 (allocation failure or signal; at very small caps `cbmc` can die with SIGSEGV
 instead of a clean error). The agent should report it as not verified (memory
