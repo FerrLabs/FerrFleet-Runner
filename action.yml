@@ -69,6 +69,7 @@ runs:
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
+        CLAUDE_CLI_VERSION: ${{ inputs.claude-cli-version }}
         GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
@@ -97,7 +98,8 @@ runs:
         command -v python3 >/dev/null || \
           echo "::warning::python3 is not on this runner, and agent prompts are told it is available."
 
-        if printf '%s' "${VERSION}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        exact='^[0-9]+\.[0-9]+\.[0-9]+$'
+        if [[ ${VERSION} =~ ${exact} ]]; then
           tag="v${VERSION}"
         else
           auth=()
@@ -131,8 +133,14 @@ runs:
         fi
 
         {
+          echo "repo=${repo}"
           echo "tag=${tag}"
           echo "target=${target}"
+          if [[ ${CLAUDE_CLI_VERSION} =~ ${exact} ]]; then
+            echo "claude-version-exact=true"
+          else
+            echo "claude-version-exact=false"
+          fi
           if command -v claude >/dev/null; then
             echo "claude-on-path=true"
           else
@@ -144,11 +152,13 @@ runs:
       if: inputs.mode == 'binary'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ${{ runner.temp }}/ferrfleet-runner/bin
+        path: ${{ runner.temp }}/ferrfleet-runner/ferrfleet-runner-${{ steps.resolve.outputs.target }}.tar.gz
         key: ferrfleet-runner-${{ steps.resolve.outputs.tag }}-${{ steps.resolve.outputs.target }}
 
     - name: Restore the Claude CLI
-      if: inputs.mode == 'binary' && steps.resolve.outputs.claude-on-path == 'false'
+      if: >-
+        inputs.mode == 'binary' && steps.resolve.outputs.claude-on-path == 'false'
+        && steps.resolve.outputs.claude-version-exact == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.local/share/claude/versions/${{ inputs.claude-cli-version }}
@@ -159,6 +169,7 @@ runs:
       if: inputs.mode == 'binary'
       shell: bash
       env:
+        REPO: ${{ steps.resolve.outputs.repo }}
         TAG: ${{ steps.resolve.outputs.tag }}
         TARGET: ${{ steps.resolve.outputs.target }}
         CLAUDE_ON_PATH: ${{ steps.resolve.outputs.claude-on-path }}
@@ -169,24 +180,29 @@ runs:
         dir="${RUNNER_TEMP}/ferrfleet-runner"
         asset="ferrfleet-runner-${TARGET}.tar.gz"
 
-        if [ -x "${dir}/bin/ferrfleet-runner" ]; then
+        base="https://github.com/${REPO}/releases/download/${TAG}"
+        mkdir -p "${dir}"
+        curl -fsSL -o "${dir}/checksums.txt" "${base}/checksums.txt"
+
+        verify() {
+          ( cd "${dir}" && grep -F " ${asset}" checksums.txt | sha256sum --check --strict --quiet - )
+        }
+
+        if [ -f "${dir}/${asset}" ] && verify; then
           echo "Using the cached ferrfleet-runner ${TAG} (${TARGET})"
         else
-          mkdir -p "${dir}/bin"
-          base="https://github.com/FerrLabs/FerrFleet-Runner/releases/download/${TAG}"
-
+          [ -f "${dir}/${asset}" ] && echo "::warning::The cached ${asset} does not match its published checksum; downloading it again."
           curl -fsSL -o "${dir}/${asset}" "${base}/${asset}"
-          curl -fsSL -o "${dir}/checksums.txt" "${base}/checksums.txt"
-
-          ( cd "${dir}" && grep -F " ${asset}" checksums.txt | sha256sum --check --strict - ) || {
+          verify || {
             echo "::error::${asset} does not match its published checksum."
             exit 1
           }
-
-          tar -xzf "${dir}/${asset}" -C "${dir}/bin" ferrfleet-runner
-          chmod +x "${dir}/bin/ferrfleet-runner"
-          echo "Installed ferrfleet-runner ${TAG} (${TARGET})"
         fi
+
+        mkdir -p "${dir}/bin"
+        tar -xzf "${dir}/${asset}" -C "${dir}/bin" ferrfleet-runner
+        chmod +x "${dir}/bin/ferrfleet-runner"
+        echo "Installed ferrfleet-runner ${TAG} (${TARGET})"
 
         echo "runner=${dir}/bin/ferrfleet-runner" >> "${GITHUB_OUTPUT}"
 

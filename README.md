@@ -149,7 +149,10 @@ you want a different one on a runner that has none.
 
 Both downloads are cached with `actions/cache`: the runner binary per release
 and target, the Claude CLI per version. A cache hit skips the download, so only
-the first run after a release or a CLI bump pays for it. The CLI's autoupdater
+the first run after a release or a CLI bump pays for it. The runner archive is
+checked against a freshly downloaded `checksums.txt` on every run, cached or not.
+Only an exact `claude-cli-version` is cached; a channel such as `stable` downloads
+every time. The CLI's autoupdater
 is disabled (`DISABLE_AUTOUPDATER=1`, also set in the image), so a run uses the
 pinned version and never downloads an update at start.
 
