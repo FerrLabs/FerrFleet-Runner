@@ -72,6 +72,12 @@ RUN cargo install --locked kani-verifier --version "${KANI_VERSION}" \
  && cargo kani setup \
  && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
 
+COPY --chown=runner:runner --chmod=0755 formal/cbmc-limit.sh /home/runner/cbmc-limit.sh
+RUN for cbmc in /home/runner/.kani/kani-*/bin/cbmc; do \
+      mv "${cbmc}" "${cbmc}.real" && cp /home/runner/cbmc-limit.sh "${cbmc}"; \
+    done \
+ && rm /home/runner/cbmc-limit.sh
+
 WORKDIR /workdir
 
 FROM runtime AS default

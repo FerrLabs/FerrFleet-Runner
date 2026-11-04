@@ -151,6 +151,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: The memory cap logic
+        run: tests/cbmc_limit.sh
+
       - name: Build the image
         run: docker build --target formal --tag ferrfleet-runner-formal:ci .
 
@@ -160,6 +163,16 @@ jobs:
           for cmd in "cargo --version" "cc --version" "cargo kani --version"; do
             docker run --rm --user runner --entrypoint sh ferrfleet-runner-formal:ci -c "${cmd}"
           done
+
+      - name: CBMC runs under the memory cap
+        run: |
+          set -euo pipefail
+          cbmc='/home/runner/.kani/kani-*/bin/cbmc'
+          docker run --rm --user runner --entrypoint sh ferrfleet-runner-formal:ci -c "${cbmc} --version"
+          if docker run --rm --user runner --env KANI_MEMORY_LIMIT=1M --entrypoint sh ferrfleet-runner-formal:ci -c "${cbmc} --version"; then
+            echo "cbmc ignored KANI_MEMORY_LIMIT" >&2
+            exit 1
+          fi
 
   action:
     name: Action manifest
