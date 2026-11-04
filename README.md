@@ -307,6 +307,23 @@ docker build --target formal -t runner-formal .
 
 A plain `docker build .` still produces the light image.
 
+### Memory cap
+
+Every `cbmc` process (what `kani` and `cargo kani` spawn to check a harness) runs
+under `prlimit --as`, so a harness that is too large fails on its own instead of
+getting the whole pod OOMKilled. The `cbmc` in Kani's bundle directory is replaced
+by a wrapper that execs the original (`cbmc.real`), so it applies however Kani is
+invoked. `cargo` and `rustc` are not capped.
+
+The cap is `KANI_MEMORY_LIMIT` (bytes, or with a `K`, `M` or `G` suffix). When
+unset it is the cgroup memory limit minus 2GiB (6GiB in an 8Gi pod), or 6GiB when
+the pod has no limit.
+
+A harness over the cap fails that `cargo kani` invocation with a CBMC out of
+memory error (`std::bad_alloc` or a failed allocation) and a non-zero exit. The
+agent should report it as not verified (memory budget exceeded) and carry on with
+the other harnesses.
+
 ## Run a pool on Kubernetes
 
 The chart in [`charts/ferrfleet-runner`](charts/ferrfleet-runner) runs a pool with
