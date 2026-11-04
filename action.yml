@@ -98,7 +98,8 @@ runs:
         command -v python3 >/dev/null || \
           echo "::warning::python3 is not on this runner, and agent prompts are told it is available."
 
-        if printf '%s' "${VERSION}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        exact='^[0-9]+\.[0-9]+\.[0-9]+$'
+        if [[ ${VERSION} =~ ${exact} ]]; then
           tag="v${VERSION}"
         else
           auth=()
@@ -135,7 +136,7 @@ runs:
           echo "repo=${repo}"
           echo "tag=${tag}"
           echo "target=${target}"
-          if printf '%s' "${CLAUDE_CLI_VERSION}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if [[ ${CLAUDE_CLI_VERSION} =~ ${exact} ]]; then
             echo "claude-version-exact=true"
           else
             echo "claude-version-exact=false"
@@ -181,17 +182,22 @@ runs:
 
         base="https://github.com/${REPO}/releases/download/${TAG}"
         mkdir -p "${dir}"
-        if [ -f "${dir}/${asset}" ]; then
-          echo "Using the cached ferrfleet-runner ${TAG} (${TARGET})"
-        else
-          curl -fsSL -o "${dir}/${asset}" "${base}/${asset}"
-        fi
         curl -fsSL -o "${dir}/checksums.txt" "${base}/checksums.txt"
 
-        ( cd "${dir}" && grep -F " ${asset}" checksums.txt | sha256sum --check --strict - ) || {
-          echo "::error::${asset} does not match its published checksum."
-          exit 1
+        verify() {
+          ( cd "${dir}" && grep -F " ${asset}" checksums.txt | sha256sum --check --strict --quiet - )
         }
+
+        if [ -f "${dir}/${asset}" ] && verify; then
+          echo "Using the cached ferrfleet-runner ${TAG} (${TARGET})"
+        else
+          [ -f "${dir}/${asset}" ] && echo "::warning::The cached ${asset} does not match its published checksum; downloading it again."
+          curl -fsSL -o "${dir}/${asset}" "${base}/${asset}"
+          verify || {
+            echo "::error::${asset} does not match its published checksum."
+            exit 1
+          }
+        fi
 
         mkdir -p "${dir}/bin"
         tar -xzf "${dir}/${asset}" -C "${dir}/bin" ferrfleet-runner
