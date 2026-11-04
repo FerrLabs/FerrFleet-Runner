@@ -147,6 +147,12 @@ PATH, in which case yours is used as it is. It defaults to an exact version that
 Renovate bumps; override it with `claude-cli-version` if
 you want a different one on a runner that has none.
 
+Both downloads are cached with `actions/cache`: the runner binary per release
+and target, the Claude CLI per version. A cache hit skips the download, so only
+the first run after a release or a CLI bump pays for it. The CLI's autoupdater
+is disabled (`DISABLE_AUTOUPDATER=1`, also set in the image), so a run uses the
+pinned version and never downloads an update at start.
+
 The runner needs Claude Code 2.1.98 or newer, the release that added
 `--exclude-dynamic-system-prompt-sections`. It runs `claude --version` before
 starting the agent and fails the run with a message naming both versions if the

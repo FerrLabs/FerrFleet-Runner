@@ -35,7 +35,8 @@ RUN apt-get update \
 RUN useradd --create-home --uid 1000 --shell /bin/bash runner
 
 ARG CLAUDE_CLI_VERSION=2.1.317
-ENV PATH=/home/runner/.local/bin:$PATH
+ENV PATH=/home/runner/.local/bin:$PATH \
+    DISABLE_AUTOUPDATER=1
 RUN su runner -c "curl -fsSL https://claude.ai/install.sh | bash -s -- '${CLAUDE_CLI_VERSION}'" \
  && /home/runner/.local/bin/claude --version
 
