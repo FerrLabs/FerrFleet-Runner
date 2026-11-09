@@ -158,10 +158,10 @@ jobs:
       - name: Build the image
         run: docker build --target formal --tag ferrfleet-runner-formal:ci .
 
-      - name: The toolchain and Kani run as the runner user
+      - name: The toolchain, Kani and FerrFlow run as the runner user
         run: |
           set -euo pipefail
-          for cmd in "cargo --version" "cc --version" "cargo kani --version"; do
+          for cmd in "cargo --version" "cc --version" "cargo kani --version" "ferrflow --version"; do
             docker run --rm --user runner --entrypoint sh ferrfleet-runner-formal:ci -c "${cmd}"
           done
 

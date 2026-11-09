@@ -51,7 +51,7 @@ ENTRYPOINT ["/usr/local/bin/ferrfleet-runner"]
 
 FROM runtime AS formal
 
-LABEL org.opencontainers.image.description="Executes one FerrFleet agent run, with a Rust toolchain and Kani for formal verification."
+LABEL org.opencontainers.image.description="Executes one FerrFleet agent run, with a Rust toolchain, Kani and FerrFlow for formal verification."
 
 USER root
 RUN apt-get update \
@@ -78,6 +78,8 @@ RUN for cbmc in /home/runner/.kani/kani-*/bin/cbmc; do \
       mv "${cbmc}" "${cbmc}.real" && cp /home/runner/cbmc-limit.sh "${cbmc}"; \
     done \
  && rm /home/runner/cbmc-limit.sh
+
+COPY --from=ghcr.io/ferrlabs/ferrflow:7.35.4@sha256:92567fbedf859f4f4777c4e3fe6d5597c1b939e6b495bdaf5ff353241a8dd23a /usr/local/bin/ferrflow /usr/local/bin/ferrflow
 
 WORKDIR /workdir
 
