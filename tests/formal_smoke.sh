@@ -7,7 +7,7 @@ root=$(cd "$(dirname "$0")" && pwd)
 log=$(mktemp)
 trap 'rm -f "${log}"' EXIT
 
-docker run --rm --read-only --tmpfs /tmp:exec --tmpfs /workdir:exec -u 1000 -w /workdir \
+docker run --rm --read-only --tmpfs /tmp:exec --tmpfs /workdir:exec,mode=1777 -u 1000 -w /workdir \
   --entrypoint sh -v "${root}/formal-smoke:/smoke:ro" "${image}" -c '
     set -eu
     cp -r /smoke/. /workdir/
