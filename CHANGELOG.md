@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.7.1] - 2026-11-09
+
+### Bug Fixes
+
+- fix(formal): run cargo and Kani on a read-only root with HOME=/tmp (#117)
+
 ## [1.7.0] - 2026-11-09
 
 ### Features
