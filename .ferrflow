@@ -1,0 +1,19 @@
+{
+  "$schema": "https://ferrflow.com/schema/ferrflow.json",
+  "workspace": {
+    "versioning": "semver",
+    "tagTemplate": "v{version}",
+    "floatingTags": ["major"],
+    "versionSource": "tag",
+    "releaseCommitBody": "full",
+    "recoverMissedReleases": true,
+    "skipCi": false
+  },
+  "package": [
+    {
+      "name": "runner",
+      "path": ".",
+      "changelog": "CHANGELOG.md"
+    }
+  ]
+}
