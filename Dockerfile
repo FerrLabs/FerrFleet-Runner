@@ -81,6 +81,9 @@ RUN for cbmc in /home/runner/.kani/kani-*/bin/cbmc; do \
 
 COPY --from=ghcr.io/ferrlabs/ferrflow:7.35.4@sha256:92567fbedf859f4f4777c4e3fe6d5597c1b939e6b495bdaf5ff353241a8dd23a /usr/local/bin/ferrflow /usr/local/bin/ferrflow
 
+ENV CARGO_HOME=/tmp/cargo \
+    KANI_HOME=/home/runner/.kani
+
 WORKDIR /workdir
 
 FROM runtime AS default

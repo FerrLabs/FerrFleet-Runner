@@ -320,6 +320,23 @@ docker build --target formal -t runner-formal .
 
 A plain `docker build .` still produces the light image.
 
+### Read-only root filesystem
+
+The image works with a read-only root filesystem when `/tmp` and `/workdir` are
+writable. `CARGO_HOME` is `/tmp/cargo` (registry and git caches), empty at
+start, so the first build of a crate with dependencies downloads them. Build
+output stays in the crate's own `target/` under `/workdir`. FerrFleet's managed
+Jobs size `/workdir` at 10Gi and `/tmp` at 4Gi for checkout runs; the chart's
+default `tmpSizeLimit` (512Mi) is too small for a registry cache, so raise it for
+a pool that runs this image. The Rust toolchain, Kani's pinned nightly and Kani's
+bundle are installed at build time under `/home/runner` (`RUSTUP_HOME`,
+`KANI_HOME=/home/runner/.kani`) and are never written to at run time. `KANI_HOME`
+is set explicitly because the runner sets `HOME=/tmp`, and Kani would otherwise
+look for its bundle under `/tmp/.kani`, download a fresh one and skip the `cbmc`
+memory cap. The cargo binaries (`cargo-kani`, `kani`) stay on `PATH` from
+`/home/runner/.cargo/bin`. `tests/formal_smoke.sh` runs `cargo build`,
+`cargo test` and `cargo kani` this way in CI, with `HOME=/tmp`.
+
 ### Memory cap
 
 Every `cbmc` process (what `kani` and `cargo kani` spawn to check a harness) runs

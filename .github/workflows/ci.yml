@@ -165,6 +165,9 @@ jobs:
             docker run --rm --user runner --entrypoint sh ferrfleet-runner-formal:ci -c "${cmd}"
           done
 
+      - name: Build, test and verify on a read-only root
+        run: tests/formal_smoke.sh ferrfleet-runner-formal:ci
+
       - name: CBMC runs under the memory cap
         run: |
           set -euo pipefail
