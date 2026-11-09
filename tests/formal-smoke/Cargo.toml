@@ -9,3 +9,5 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 
 [dependencies]
 itoa = "=1.0.15"
+
+[workspace]

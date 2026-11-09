@@ -7,7 +7,7 @@ root=$(cd "$(dirname "$0")" && pwd)
 log=$(mktemp)
 trap 'rm -f "${log}"' EXIT
 
-docker run --rm --read-only --tmpfs /tmp:exec --tmpfs /workdir:exec,mode=1777 -u 1000 -w /workdir \
+docker run --rm --read-only --tmpfs /tmp:exec --tmpfs /workdir:exec,mode=1777 -u 1000 -e HOME=/tmp -w /workdir \
   --entrypoint sh -v "${root}/formal-smoke:/smoke:ro" "${image}" -c '
     set -eu
     cp -r /smoke/. /workdir/
@@ -24,4 +24,7 @@ if grep -Eq "info: (downloading|syncing channel|installing component)" "${log}";
   echo "toolchain download at run time" >&2
   exit 1
 fi
-grep -q "VERIFICATION:- SUCCESSFUL" "${log}"
+if ! grep -q "VERIFICATION:- SUCCESSFUL" "${log}"; then
+  echo "kani did not report a successful verification" >&2
+  exit 1
+fi

@@ -302,10 +302,12 @@ one is marked failed rather than run twice.
 
 `ghcr.io/ferrlabs/ferrfleet/runner-formal` is the runner image plus what an agent
 needs to verify Rust code: `build-essential`, `pkg-config`, `libssl-dev`, a
-minimal stable Rust toolchain with `clippy` and `rustfmt`, and
+minimal stable Rust toolchain with `clippy` and `rustfmt`,
 [Kani](https://github.com/model-checking/kani) with its CBMC backend already
-set up. It is published with the same tags, signature, provenance and SBOM as
-the main image, and the same entrypoint.
+set up, and the [FerrFlow](https://github.com/FerrLabs/FerrFlow) CLI so
+`ferrflow validate` can check a release config offline. It is published with
+the same tags, signature, provenance and SBOM as the main image, and the same
+entrypoint.
 
 An agent selects it through the FerrFleet API with the per-agent option
 `runner_image: "formal"`. FerrFleet resolves the name through one environment
@@ -323,13 +325,17 @@ A plain `docker build .` still produces the light image.
 The image works with a read-only root filesystem when `/tmp` and `/workdir` are
 writable. `CARGO_HOME` is `/tmp/cargo` (registry and git caches), empty at
 start, so the first build of a crate with dependencies downloads them. Build
-output stays in the crate's own `target/` under `/workdir`, which FerrFleet sizes
-for a Rust build (10Gi) while `/tmp` is capped at 4Gi. The Rust toolchain, Kani's pinned
-nightly and Kani's bundle are installed at build time under `/home/runner`
-(`RUSTUP_HOME`, `~/.kani`) and are never written to at run time. The cargo
-binaries (`cargo-kani`, `kani`) stay on `PATH` from `/home/runner/.cargo/bin`.
-`tests/formal_smoke.sh` runs `cargo build`, `cargo test` and `cargo kani` this way
-in CI.
+output stays in the crate's own `target/` under `/workdir`. FerrFleet's managed
+Jobs size `/workdir` at 10Gi and `/tmp` at 4Gi for checkout runs; the chart's
+default `tmpSizeLimit` (512Mi) is too small for a registry cache, so raise it for
+a pool that runs this image. The Rust toolchain, Kani's pinned nightly and Kani's
+bundle are installed at build time under `/home/runner` (`RUSTUP_HOME`,
+`KANI_HOME=/home/runner/.kani`) and are never written to at run time. `KANI_HOME`
+is set explicitly because the runner sets `HOME=/tmp`, and Kani would otherwise
+look for its bundle under `/tmp/.kani`, download a fresh one and skip the `cbmc`
+memory cap. The cargo binaries (`cargo-kani`, `kani`) stay on `PATH` from
+`/home/runner/.cargo/bin`. `tests/formal_smoke.sh` runs `cargo build`,
+`cargo test` and `cargo kani` this way in CI, with `HOME=/tmp`.
 
 ### Memory cap
 

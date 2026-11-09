@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # GitHub-hosted, not the org's self-hosted pool. This repository is public, so a
 # fork's pull request can propose the workflow that runs on it; pointing that at
@@ -157,10 +158,10 @@ jobs:
       - name: Build the image
         run: docker build --target formal --tag ferrfleet-runner-formal:ci .
 
-      - name: The toolchain and Kani run as the runner user
+      - name: The toolchain, Kani and FerrFlow run as the runner user
         run: |
           set -euo pipefail
-          for cmd in "cargo --version" "cc --version" "cargo kani --version"; do
+          for cmd in "cargo --version" "cc --version" "cargo kani --version" "ferrflow --version"; do
             docker run --rm --user runner --entrypoint sh ferrfleet-runner-formal:ci -c "${cmd}"
           done
 
@@ -249,7 +250,7 @@ jobs:
   release:
     name: Release with FerrFlow
     needs: [check, deny, musl, image, formal-image, action, chart]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     concurrency:
       group: release-${{ github.ref }}
       cancel-in-progress: false
