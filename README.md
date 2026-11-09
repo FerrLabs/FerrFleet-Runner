@@ -302,10 +302,12 @@ one is marked failed rather than run twice.
 
 `ghcr.io/ferrlabs/ferrfleet/runner-formal` is the runner image plus what an agent
 needs to verify Rust code: `build-essential`, `pkg-config`, `libssl-dev`, a
-minimal stable Rust toolchain with `clippy` and `rustfmt`, and
+minimal stable Rust toolchain with `clippy` and `rustfmt`,
 [Kani](https://github.com/model-checking/kani) with its CBMC backend already
-set up. It is published with the same tags, signature, provenance and SBOM as
-the main image, and the same entrypoint.
+set up, and the [FerrFlow](https://github.com/FerrLabs/FerrFlow) CLI so
+`ferrflow validate` can check a release config offline. It is published with
+the same tags, signature, provenance and SBOM as the main image, and the same
+entrypoint.
 
 An agent selects it through the FerrFleet API with the per-agent option
 `runner_image: "formal"`. FerrFleet resolves the name through one environment
