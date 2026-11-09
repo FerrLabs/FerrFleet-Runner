@@ -67,9 +67,9 @@ default_limit() {
   if [ -z "$max" ]; then
     echo "$fallback"
   elif [ "$max" -gt $((8 * gib)) ]; then
-    echo $((max - 2 * gib))
+    echo $((max - 4 * gib))
   else
-    echo $((max * 3 / 4))
+    echo $((max / 2))
   fi
 }
 

@@ -63,17 +63,19 @@ expect_reject() {
 }
 
 setup "$((8 * gib))"
-expect_cap "8Gi pod" "$((6 * gib))"
+expect_cap "8Gi pod" "$((4 * gib))"
 setup "$((2 * gib))"
-expect_cap "2Gi pod stays under limit" "$((3 * gib / 2))"
+expect_cap "2Gi pod stays under limit" "$((1 * gib))"
 setup "$((16 * gib))"
-expect_cap "16Gi pod" "$((14 * gib))"
+expect_cap "16Gi pod" "$((12 * gib))"
+setup "$((12 * gib))"
+expect_cap "12Gi pod leaves 4Gi to the rest of the pod" "$((8 * gib))"
 setup "max"
 expect_cap "unlimited v2" "$((6 * gib))"
 setup
 expect_cap "no cgroup" "$((6 * gib))"
 setup "" "$((4 * gib))"
-expect_cap "cgroup v1 4Gi" "$((3 * gib))"
+expect_cap "cgroup v1 4Gi" "$((2 * gib))"
 setup "" "9223372036854771712"
 expect_cap "cgroup v1 unlimited" "$((6 * gib))"
 setup "" "$((128 * gib))"
