@@ -71,13 +71,18 @@ RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path \
 ARG KANI_VERSION=0.68.0
 RUN cargo install --locked kani-verifier --version "${KANI_VERSION}" \
  && cargo kani setup \
- && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
+ && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
+ && ls /home/runner/.kani/kani-*/ \
+ && cat /home/runner/.kani/kani-*/rust-toolchain-version \
+ && rustup toolchain list
 
 COPY --chown=runner:runner --chmod=0755 formal/cbmc-limit.sh /home/runner/cbmc-limit.sh
 RUN for cbmc in /home/runner/.kani/kani-*/bin/cbmc; do \
       mv "${cbmc}" "${cbmc}.real" && cp /home/runner/cbmc-limit.sh "${cbmc}"; \
     done \
  && rm /home/runner/cbmc-limit.sh
+
+ENV CARGO_TARGET_DIR=/tmp/target
 
 WORKDIR /workdir
 
