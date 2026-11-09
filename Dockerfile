@@ -79,8 +79,7 @@ RUN for cbmc in /home/runner/.kani/kani-*/bin/cbmc; do \
     done \
  && rm /home/runner/cbmc-limit.sh
 
-ENV CARGO_HOME=/tmp/cargo \
-    CARGO_TARGET_DIR=/tmp/target
+ENV CARGO_HOME=/tmp/cargo
 
 WORKDIR /workdir
 

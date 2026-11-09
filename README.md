@@ -321,9 +321,10 @@ A plain `docker build .` still produces the light image.
 ### Read-only root filesystem
 
 The image works with a read-only root filesystem when `/tmp` and `/workdir` are
-writable. `CARGO_HOME` is `/tmp/cargo` (registry and git caches) and
-`CARGO_TARGET_DIR` is `/tmp/target`; both are empty at start, so the first build
-of a crate with dependencies downloads them. The Rust toolchain, Kani's pinned
+writable. `CARGO_HOME` is `/tmp/cargo` (registry and git caches), empty at
+start, so the first build of a crate with dependencies downloads them. Build
+output stays in the crate's own `target/` under `/workdir`, which FerrFleet sizes
+for a Rust build (10Gi) while `/tmp` is capped at 4Gi. The Rust toolchain, Kani's pinned
 nightly and Kani's bundle are installed at build time under `/home/runner`
 (`RUSTUP_HOME`, `~/.kani`) and are never written to at run time. The cargo
 binaries (`cargo-kani`, `kani`) stay on `PATH` from `/home/runner/.cargo/bin`.
