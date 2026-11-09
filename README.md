@@ -334,8 +334,11 @@ wrapper prints a message on stderr and exits 2 without running `cbmc`.
 When it is unset, the cap is derived from the pod's memory limit, read from cgroup
 v2 (`/sys/fs/cgroup/memory.max`) or else cgroup v1
 (`/sys/fs/cgroup/memory/memory.limit_in_bytes`, ignored when at or above the node's
-`MemTotal`): 3/4 of the limit up to 8GiB (6GiB in an 8Gi pod), the limit minus 2GiB
-above that. With no limit at all it is 6GiB.
+`MemTotal`): half the limit up to 8GiB (4GiB in an 8Gi pod), the limit minus 4GiB
+above that (8GiB in a 12Gi pod). The rest of the pod (the agent CLI, `cargo` and
+`rustc`, the Vault Agent sidecar) needs that headroom: with a 2GiB margin a large
+harness got the whole pod OOMKilled before `cbmc` hit its own cap. With no limit at
+all it is 6GiB.
 
 The cap applies to each `cbmc` process, not to the pod. Kani checks harnesses one
 at a time by default; with `--jobs N`, N processes can each reach the cap, so set
