@@ -79,7 +79,7 @@ RUN for cbmc in /home/runner/.kani/kani-*/bin/cbmc; do \
     done \
  && rm /home/runner/cbmc-limit.sh
 
-COPY --from=ghcr.io/ferrlabs/ferrflow:7.35.4@sha256:92567fbedf859f4f4777c4e3fe6d5597c1b939e6b495bdaf5ff353241a8dd23a /usr/local/bin/ferrflow /usr/local/bin/ferrflow
+COPY --from=ghcr.io/ferrlabs/ferrflow:7.35.6@sha256:d67d0844a206a4f6104c4d082ad29253b57d2a56526ec777192535618a25a75b /usr/local/bin/ferrflow /usr/local/bin/ferrflow
 
 ENV CARGO_HOME=/tmp/cargo \
     KANI_HOME=/home/runner/.kani
