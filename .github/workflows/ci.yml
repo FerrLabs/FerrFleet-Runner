@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # GitHub-hosted, not the org's self-hosted pool. This repository is public, so a
 # fork's pull request can propose the workflow that runs on it; pointing that at
@@ -246,7 +247,7 @@ jobs:
   release:
     name: Release with FerrFlow
     needs: [check, deny, musl, image, formal-image, action, chart]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     concurrency:
       group: release-${{ github.ref }}
       cancel-in-progress: false
