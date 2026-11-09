@@ -14,6 +14,8 @@ docker run --rm --read-only --tmpfs /tmp:exec --tmpfs /workdir:exec,mode=1777 -u
     cargo build
     cargo test
     cargo kani
+    if [ -e /tmp/.kani ]; then echo "kani fetched a bundle under HOME" >&2; exit 1; fi
+    ls /home/runner/.kani/kani-*/bin/cbmc.real >/dev/null
   ' 2>&1 | tee "${log}"
 
 if grep -q "Read-only file system" "${log}"; then
