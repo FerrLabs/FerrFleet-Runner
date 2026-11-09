@@ -7,7 +7,7 @@
     "versionSource": "tag",
     "releaseCommitBody": "full",
     "recoverMissedReleases": true,
-    "skipCi": true
+    "skipCi": false
   },
   "package": [
     {

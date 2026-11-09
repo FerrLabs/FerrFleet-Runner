@@ -254,4 +254,5 @@ jobs:
       contents: write
       id-token: write
     uses: FerrLabs/.github/.github/workflows/reusable-ferrflow-release.yml@be40b72b4ed5d23c0b5023063417211548729eaf # main
-    secrets: inherit
+    secrets:
+      TAG_SIGNING_KEY: ${{ secrets.TAG_SIGNING_KEY }}
