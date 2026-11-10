@@ -95,6 +95,8 @@ fn inherits_a_claude_credential() -> bool {
         .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
 }
 
+const HEADLESS_DISALLOWED_TOOLS: [&str; 3] = ["Monitor", "ScheduleWakeup", "CronCreate"];
+
 /// Construit la commande `claude` du run : arguments, identifiants, canal
 /// d'authentification git et configuration MCP.
 fn build_claude_command(
@@ -148,6 +150,11 @@ fn build_claude_command(
     // refused even under `bypassPermissions` below.
     for tool in &cfg.disallowed_tools {
         cmd.arg("--disallowed-tools").arg(tool);
+    }
+    for tool in HEADLESS_DISALLOWED_TOOLS {
+        if !cfg.disallowed_tools.iter().any(|t| t == tool) {
+            cmd.arg("--disallowed-tools").arg(tool);
+        }
     }
 
     // Without this the CLI falls back to interactive approval, and nobody is
@@ -398,6 +405,32 @@ mod environment_note_tests {
             .position(|a| *a == "--append-system-prompt-file")
             .expect("the system prompt is passed as a file");
         std::fs::read_to_string(args[at + 1]).expect("reading the system prompt file")
+    }
+
+    fn disallowed(args: &[&std::ffi::OsStr]) -> Vec<String> {
+        args.windows(2)
+            .filter(|pair| pair[0] == "--disallowed-tools")
+            .map(|pair| pair[1].to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn tools_that_wait_for_a_later_turn_are_never_offered() {
+        let mut cfg = config(
+            "01999999-9999-7999-9999-999999999989",
+            "/workdir",
+            "abc",
+            None,
+        );
+        cfg.disallowed_tools = vec!["WebFetch".to_string(), "Monitor".to_string()];
+        let invocation =
+            build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
+        let args: Vec<_> = invocation.command.as_std().get_args().collect();
+
+        assert_eq!(
+            disallowed(&args),
+            ["WebFetch", "Monitor", "ScheduleWakeup", "CronCreate"]
+        );
     }
 
     #[test]
