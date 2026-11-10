@@ -309,10 +309,9 @@ set up, and the [FerrFlow](https://github.com/FerrLabs/FerrFlow) CLI so
 the same tags, signature, provenance and SBOM as the main image, and the same
 entrypoint.
 
-An agent selects it through the FerrFleet API with the per-agent option
-`runner_image: "formal"`. FerrFleet resolves the name through one environment
-variable per variant, `FERRFLEET_RUNNER_IMAGE_<NAME>`, for example
-`FERRFLEET_RUNNER_IMAGE_FORMAL=ghcr.io/ferrlabs/ferrfleet/runner-formal:1`.
+An agent runs on it through a runner pool: deploy runners with this image, register
+them in a FerrFleet runner pool, and assign the agent to that pool. There is no
+per-agent image option; `options.runner_image` is ignored by FerrFleet.
 
 ```bash
 docker build --target formal -t runner-formal .
