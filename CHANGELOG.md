@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.8.0] - 2026-11-10
+
+### Features
+
+- feat(formal): add sccache and extra volumes for a persistent build cache (#124)
+
 ## [1.7.2] - 2026-11-10
 
 ### Bug Fixes
