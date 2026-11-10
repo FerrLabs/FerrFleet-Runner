@@ -27,3 +27,10 @@ networkPolicy:
       ports:
         - protocol: TCP
           port: 3128
+extraVolumes:
+  - name: cache
+    persistentVolumeClaim:
+      claimName: runner-cache
+extraVolumeMounts:
+  - name: cache
+    mountPath: /cache
