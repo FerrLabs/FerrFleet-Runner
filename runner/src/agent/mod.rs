@@ -17,6 +17,7 @@ mod heartbeat;
 mod pool;
 #[cfg(test)]
 mod tests;
+mod workroot;
 
 use heartbeat::Heartbeat;
 use pool::{Lease, Poll, PoolClient};
@@ -155,6 +156,9 @@ where
     }
 
     pub async fn serve(&self, mode: Mode, mut shutdown: watch::Receiver<bool>) -> Result<Ended> {
+        if mode == Mode::Loop {
+            workroot::clear_stale(&self.config.work_root);
+        }
         let mut retry_delay = self.timings.poll_retry_first;
         loop {
             let poll = tokio::select! {

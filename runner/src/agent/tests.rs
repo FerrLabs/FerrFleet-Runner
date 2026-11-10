@@ -467,6 +467,112 @@ async fn each_run_works_in_a_fresh_directory_removed_after_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+fn stale_run_dir(root: &std::path::Path) -> PathBuf {
+    let stale = root.join("stale-run");
+    std::fs::create_dir_all(stale.join("target/debug")).unwrap();
+    std::fs::write(stale.join("target/debug/big.o"), b"leftover").unwrap();
+    stale
+}
+
+async fn idle_pool_agent(config: AgentConfig) {
+    let agent = Agent::new(config, TIMINGS, |_, _| async {
+        Ok(RunOutcome::Completed { exit_code: 0 })
+    });
+    let ended = agent
+        .serve(Mode::Loop, watch::channel(true).1)
+        .await
+        .unwrap();
+    assert_eq!(ended, Ended::Shutdown);
+}
+
+#[tokio::test]
+async fn a_pool_agent_clears_checkouts_left_by_a_killed_run_before_taking_any() {
+    let api = FakeApi::routed(|_, _| nothing_yet()).await;
+    let config = config(&api);
+    let root = config.work_root.clone();
+    let stale = stale_run_dir(&root);
+    std::fs::write(root.join("stray-file"), b"x").unwrap();
+
+    idle_pool_agent(config).await;
+
+    assert!(
+        !stale.exists(),
+        "a dead run's checkout would fill the volume"
+    );
+    assert!(!root.join("stray-file").exists());
+    assert_eq!(count(&api, is_lease), 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn clearing_stale_checkouts_keeps_the_work_root_itself() {
+    let api = FakeApi::routed(|_, _| nothing_yet()).await;
+    let config = config(&api);
+    let root = config.work_root.clone();
+    stale_run_dir(&root);
+
+    idle_pool_agent(config).await;
+
+    assert!(root.is_dir(), "the root is the volume mount point");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_missing_work_root_does_not_stop_a_pool_agent() {
+    let api = FakeApi::routed(|_, _| nothing_yet()).await;
+    let config = config(&api);
+    assert!(!config.work_root.exists());
+
+    idle_pool_agent(config).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn clearing_stale_checkouts_never_follows_a_symlink_out_of_the_root() {
+    let api = FakeApi::routed(|_, _| nothing_yet()).await;
+    let config = config(&api);
+    let root = config.work_root.clone();
+    let outside = std::env::temp_dir().join(format!("ferrfleet-outside-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep"), b"x").unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+    idle_pool_agent(config).await;
+
+    assert!(outside.join("keep").exists());
+    assert!(!root.join("link").exists());
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[tokio::test]
+async fn an_ephemeral_agent_leaves_the_work_root_alone() {
+    let api = FakeApi::routed(|r, _| {
+        if is_lease(r) {
+            leased(30)
+        } else {
+            Reply::status(200)
+        }
+    })
+    .await;
+    let config = config(&api);
+    let root = config.work_root.clone();
+    let stale = stale_run_dir(&root);
+    let agent = Agent::new(config, TIMINGS, |_, _| async {
+        Ok(RunOutcome::Completed { exit_code: 0 })
+    });
+
+    agent
+        .serve(Mode::Ephemeral, watch::channel(false).1)
+        .await
+        .unwrap();
+
+    assert!(stale.exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 const DISPATCH_PATH: &str = "/runner-pools/dispatch";
 
 fn is_dispatch(r: &Received) -> bool {
