@@ -45,6 +45,10 @@ jobs:
       - name: Action routing
         run: tests/action_routing.sh
 
+  kani:
+    name: Kani
+    uses: FerrLabs/.github/.github/workflows/reusable-kani.yml@ca4906e7dbab75e0ea8129a3f9a3a68cb722c2a0 # main
+
   deny:
     name: Cargo Security
     runs-on: ubuntu-latest
@@ -249,7 +253,7 @@ jobs:
 
   release:
     name: Release with FerrFlow
-    needs: [check, deny, musl, image, formal-image, action, chart]
+    needs: [check, kani, deny, musl, image, formal-image, action, chart]
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     concurrency:
       group: release-${{ github.ref }}

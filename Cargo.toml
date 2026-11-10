@@ -20,6 +20,7 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [workspace.dependencies]
+proptest = "1"
 ferrfleet-shared = { version = "0.1.0", path = "shared" }
 
 tokio = { version = "1", features = ["full"] }
