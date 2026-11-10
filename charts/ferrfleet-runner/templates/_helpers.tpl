@@ -137,6 +137,9 @@ containers:
         mountPath: /workdir
       - name: tmp
         mountPath: /tmp
+      {{- with .Values.extraVolumeMounts }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
 volumes:
   - name: workdir
     emptyDir:
@@ -144,4 +147,7 @@ volumes:
   - name: tmp
     emptyDir:
       sizeLimit: {{ .Values.tmpSizeLimit }}
+  {{- with .Values.extraVolumes }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
 {{- end }}

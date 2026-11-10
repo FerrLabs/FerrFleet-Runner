@@ -165,7 +165,7 @@ jobs:
       - name: The toolchain, Kani and FerrFlow run as the runner user
         run: |
           set -euo pipefail
-          for cmd in "cargo --version" "cc --version" "cargo kani --version" "ferrflow --version"; do
+          for cmd in "cargo --version" "cc --version" "cargo kani --version" "ferrflow --version" "sccache --version"; do
             docker run --rm --user runner --entrypoint sh ferrfleet-runner-formal:ci -c "${cmd}"
           done
 
@@ -224,6 +224,12 @@ jobs:
           grep -q 'kind: ScaledJob' rendered/scaledjob.yaml
           grep -q -- '- --ephemeral' rendered/scaledjob.yaml
           grep -q 'kind: Deployment' rendered/deployment.yaml
+          grep -q 'claimName: runner-cache' rendered/deployment.yaml
+          grep -q 'mountPath: /cache' rendered/deployment.yaml
+          if grep -q 'runner-cache' rendered/scaledjob.yaml; then
+            echo "::error::extra volumes rendered without being set"
+            exit 1
+          fi
           if grep -q -e 'keda.sh' -e '--ephemeral' rendered/deployment.yaml; then
             echo "::error::deployment mode rendered KEDA objects or an ephemeral runner"
             exit 1
