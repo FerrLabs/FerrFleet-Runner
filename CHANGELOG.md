@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.7.2] - 2026-11-10
+
+### Bug Fixes
+
+- fix(runner): never offer tools that wait for a later turn (#120)
+
 ## [1.7.1] - 2026-11-09
 
 ### Bug Fixes
