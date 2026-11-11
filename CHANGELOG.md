@@ -4,6 +4,16 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.9.0] - 2026-11-11
+
+### Features
+
+- feat(image): ship a pinned mcp-grafana (#127)
+
+### Bug Fixes
+
+- fix(runner): clear stale run directories when the pool agent starts (#123)
+
 ## [1.8.0] - 2026-11-10
 
 ### Features
