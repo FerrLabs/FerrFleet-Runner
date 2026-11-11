@@ -162,3 +162,28 @@ fn clear_stale_tolerates_degenerate_roots() {
     assert!(dir.join("empty").is_dir());
     fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn clear_stale_keeps_directories_not_named_in_the_canonical_form() {
+    let root = scratch("names");
+    let id = Uuid::new_v4();
+    let others = [
+        id.simple().to_string(),
+        id.braced().to_string(),
+        id.urn().to_string(),
+        id.hyphenated().to_string().to_uppercase(),
+    ];
+    for name in &others {
+        fs::create_dir(root.join(name)).unwrap();
+    }
+    let run = root.join(id.hyphenated().to_string());
+    fs::create_dir(&run).unwrap();
+
+    clear_stale(&root);
+
+    assert!(!run.exists());
+    for name in &others {
+        assert!(root.join(name).is_dir(), "{name} was swept");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}

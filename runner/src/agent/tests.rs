@@ -522,21 +522,6 @@ async fn clearing_stale_checkouts_keeps_directories_that_are_not_run_ids() {
 }
 
 #[tokio::test]
-async fn a_pool_agent_skips_the_sweep_while_another_agent_holds_the_root() {
-    let api = FakeApi::routed(|_, _| nothing_yet()).await;
-    let config = config(&api);
-    let root = config.work_root.clone();
-    let live = stale_run_dir(&root);
-    let first = RootLock::exclusive(&root).expect("the first agent takes the root");
-
-    idle_pool_agent(config).await;
-
-    assert!(live.exists(), "a second agent wiped the first one's run");
-    drop(first);
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[tokio::test]
 async fn a_pool_agent_skips_the_sweep_while_a_dispatch_run_is_live() {
     let api = FakeApi::routed(|_, _| nothing_yet()).await;
     let config = config(&api);
@@ -1023,4 +1008,82 @@ async fn a_dispatch_pinned_to_a_commit_retries_a_500() {
 
     assert_eq!(ended, Ended::RunDone);
     assert_eq!(count(&api, is_dispatch), 2);
+}
+
+fn serving_agent(config: AgentConfig) -> (watch::Sender<bool>, tokio::task::JoinHandle<Ended>) {
+    let (stop, shutdown) = watch::channel(false);
+    let agent = Agent::new(config, TIMINGS, |_, _| async {
+        Ok(RunOutcome::Completed { exit_code: 0 })
+    });
+    let served = tokio::spawn(async move { agent.serve(Mode::Loop, shutdown).await.unwrap() });
+    (stop, served)
+}
+
+async fn until_polling(api: &FakeApi) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while count(api, is_lease) == 0 {
+        assert!(Instant::now() < deadline, "the agent never started polling");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_serving_pool_agent_lets_a_dispatch_run_take_a_shared_lock() {
+    let api = FakeApi::routed(|_, _| nothing_yet()).await;
+    let config = config(&api);
+    let root = config.work_root.clone();
+    let (stop, served) = serving_agent(config);
+    until_polling(&api).await;
+
+    let dispatch = RootLock::shared(&root);
+
+    assert!(dispatch.is_ok(), "a serving agent locks dispatch runs out");
+    assert!(
+        RootLock::exclusive(&root).is_none(),
+        "a sweep could run under the dispatch run"
+    );
+    stop.send(true).unwrap();
+    assert_eq!(served.await.unwrap(), Ended::Shutdown);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_restarted_pool_agent_does_not_sweep_a_live_dispatch_run() {
+    let api = FakeApi::routed(|_, _| nothing_yet()).await;
+    let config = config(&api);
+    let root = config.work_root.clone();
+    let (stop, first) = serving_agent(config.clone());
+    until_polling(&api).await;
+    let dispatch = RootLock::shared(&root).expect("a dispatch run takes a shared lock");
+    let live = stale_run_dir(&root);
+    stop.send(true).unwrap();
+    assert_eq!(first.await.unwrap(), Ended::Shutdown);
+
+    idle_pool_agent(config).await;
+
+    assert!(live.exists(), "the restarted agent wiped a live run");
+    drop(dispatch);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_dispatch_run_that_cannot_lock_the_root_fails_instead_of_running_unprotected() {
+    let api = FakeApi::routed(|_, _| leased(30)).await;
+    let config = config(&api);
+    let root = config.work_root.clone();
+    let _sweeper = {
+        std::fs::create_dir_all(&root).unwrap();
+        RootLock::exclusive(&root).expect("a sweep holds the root")
+    };
+    let agent = Agent::new(config, TIMINGS, |_, _| async {
+        Ok(RunOutcome::Completed { exit_code: 0 })
+    });
+
+    let result = agent
+        .dispatch("agent-1", &serde_json::json!({}), None)
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(count(&api, |r| r.path.contains("dispatch")), 0);
+    let _ = std::fs::remove_dir_all(&root);
 }

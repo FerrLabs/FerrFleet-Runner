@@ -25,6 +25,8 @@ use heartbeat::Heartbeat;
 use pool::{Lease, Poll, PoolClient};
 use workroot::RootLock;
 
+const LOCK_ATTEMPTS: u32 = 20;
+const LOCK_RETRY: Duration = Duration::from_millis(100);
 const USAGE: &str = "usage: ferrfleet-runner agent [--ephemeral]";
 const DISPATCH_USAGE: &str = "usage: ferrfleet-runner dispatch <agent-id> <context-json>";
 
@@ -159,7 +161,7 @@ where
     }
 
     pub async fn serve(&self, mode: Mode, mut shutdown: watch::Receiver<bool>) -> Result<Ended> {
-        let _root_lock = self.claim_root(mode).await;
+        let _root_lock = self.claim_root(mode).await?;
         let mut retry_delay = self.timings.poll_retry_first;
         loop {
             let poll = tokio::select! {
@@ -194,7 +196,7 @@ where
         }
     }
 
-    async fn claim_root(&self, mode: Mode) -> Option<RootLock> {
+    async fn claim_root(&self, mode: Mode) -> Result<RootLock> {
         let root = &self.config.work_root;
         if mode == Mode::Loop {
             if let Some(lock) = RootLock::exclusive(root) {
@@ -204,11 +206,12 @@ where
                 {
                     warn!(?err, "clearing stale run directories did not finish");
                 }
-                return Some(lock);
+                drop(lock);
+            } else {
+                warn!("another runner holds the work root; leaving its run directories alone");
             }
-            warn!("another runner holds the work root; leaving its run directories alone");
         }
-        RootLock::shared(root)
+        hold_shared(root).await
     }
 
     pub async fn dispatch(
@@ -217,7 +220,7 @@ where
         context: &serde_json::Value,
         run_id_file: Option<&Path>,
     ) -> Result<Ended> {
-        let _root_lock = RootLock::shared(&self.config.work_root);
+        let _root_lock = hold_shared(&self.config.work_root).await?;
         let lease = self.pool.dispatch(agent_id, context).await?;
         if let Some(path) = run_id_file
             && let Err(err) = std::fs::write(path, lease.run_id.to_string())
@@ -249,6 +252,25 @@ where
 
         remove_workdir(&workdir);
         verdict(outcome)
+    }
+}
+
+async fn hold_shared(root: &Path) -> Result<RootLock> {
+    let mut attempts = 0;
+    loop {
+        match RootLock::shared(root) {
+            Ok(lock) => return Ok(lock),
+            Err(err)
+                if err.kind() == std::io::ErrorKind::WouldBlock && attempts < LOCK_ATTEMPTS =>
+            {
+                attempts += 1;
+                tokio::time::sleep(LOCK_RETRY).await;
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("could not lock the work root {}", root.display()));
+            }
+        }
     }
 }
 

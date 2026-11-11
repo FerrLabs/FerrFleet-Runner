@@ -15,29 +15,27 @@ pub struct RootLock {
 
 impl RootLock {
     pub fn exclusive(root: &Path) -> Option<Self> {
-        Self::acquire(root, FileExt::try_lock)
-    }
-
-    pub fn shared(root: &Path) -> Option<Self> {
-        Self::acquire(root, FileExt::try_lock_shared)
-    }
-
-    fn acquire(root: &Path, lock: impl FnOnce(&File) -> Result<(), TryLockError>) -> Option<Self> {
-        let file = match open_lock_file(root) {
-            Ok(file) => file,
+        match Self::acquire(root, FileExt::try_lock) {
+            Ok(lock) => Some(lock),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => None,
             Err(err) => {
-                warn!(?err, path = %root.display(), "could not open the work root lock");
-                return None;
-            }
-        };
-        match lock(&file) {
-            Ok(()) => Some(Self { _file: file }),
-            Err(TryLockError::WouldBlock) => None,
-            Err(TryLockError::Error(err)) => {
                 warn!(?err, path = %root.display(), "could not lock the work root");
                 None
             }
         }
+    }
+
+    pub fn shared(root: &Path) -> io::Result<Self> {
+        Self::acquire(root, FileExt::try_lock_shared)
+    }
+
+    fn acquire(
+        root: &Path,
+        lock: impl FnOnce(&File) -> Result<(), TryLockError>,
+    ) -> io::Result<Self> {
+        let file = open_lock_file(root)?;
+        lock(&file)?;
+        Ok(Self { _file: file })
     }
 }
 
@@ -77,8 +75,9 @@ pub fn clear_stale(root: &Path) {
 
 fn is_run_directory(entry: &fs::DirEntry) -> bool {
     entry.file_type().is_ok_and(|kind| kind.is_dir())
-        && entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| Uuid::parse_str(name).is_ok())
+        && entry.file_name().to_str().is_some_and(is_run_id)
+}
+
+fn is_run_id(name: &str) -> bool {
+    Uuid::parse_str(name).is_ok_and(|id| id.hyphenated().to_string() == name)
 }
