@@ -469,6 +469,31 @@ so their spend and rate limits show on their own. The chart passes it to the
 runners as `ANTHROPIC_API_KEY`. It stays in your cluster: the runner never sends
 it to FerrFleet.
 
+## Private Grafana
+
+A `grafana` connector marked as reached through a runner pool runs `mcp-grafana`
+next to the agent, so the call to Grafana leaves from your network. The image
+ships the upstream static binary, pinned by digest, at `/usr/local/bin/mcp-grafana`.
+
+It needs the image: the Helm chart, or the action in `docker` mode. The action's
+`binary` mode has no `mcp-grafana`.
+
+With `networkPolicy.enabled`, the default `blockedCidrs` cover RFC1918, so allow
+the Grafana address with `extraEgress`:
+
+```yaml
+networkPolicy:
+  enabled: true
+  extraEgress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 3000
+```
+
 ## Run a pool with Docker Compose
 
 For a host without Kubernetes,

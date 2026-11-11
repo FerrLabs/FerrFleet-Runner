@@ -148,6 +148,9 @@ jobs:
             exit 1
           }
 
+      - name: mcp-grafana lists the datasources of a Grafana over stdio
+        run: tests/mcp_grafana_smoke.sh ferrfleet-runner:ci
+
   formal-image:
     name: Formal image builds
     runs-on: ubuntu-latest

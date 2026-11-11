@@ -41,6 +41,7 @@ RUN su runner -c "curl -fsSL https://claude.ai/install.sh | bash -s -- '${CLAUDE
  && /home/runner/.local/bin/claude --version
 
 COPY --from=builder /build/target/release/ferrfleet-runner /usr/local/bin/ferrfleet-runner
+COPY --from=grafana/mcp-grafana:2.3.0@sha256:c27248b5919d09d64ea273ca1b128b32902c6796f6e2dfcd11849d4f1363f9ed /app/mcp-grafana /usr/local/bin/mcp-grafana
 RUN install -d -o runner -g runner /workdir \
  && git config --system --add safe.directory /workdir
 
