@@ -542,7 +542,7 @@ async fn a_pool_agent_sweeps_once_the_previous_holder_is_gone() {
     let config = config(&api);
     let root = config.work_root.clone();
     let stale = stale_run_dir(&root);
-    drop(RootLock::exclusive(&root));
+    drop(RootLock::exclusive(&root).unwrap());
 
     idle_pool_agent(config).await;
 
@@ -567,7 +567,7 @@ async fn a_dispatch_run_holds_the_root_until_it_ends() {
         let observed = observed.clone();
         let root = root.clone();
         move |_, _| {
-            *observed.lock().unwrap() = Some(RootLock::exclusive(&root).is_none());
+            *observed.lock().unwrap() = Some(RootLock::exclusive(&root).unwrap().is_none());
             async { Ok(RunOutcome::Completed { exit_code: 0 }) }
         }
     });
@@ -579,7 +579,7 @@ async fn a_dispatch_run_holds_the_root_until_it_ends() {
 
     assert_eq!(*observed.lock().unwrap(), Some(true));
     assert!(
-        RootLock::exclusive(&root).is_some(),
+        RootLock::exclusive(&root).unwrap().is_some(),
         "the lock outlived the run"
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -1039,7 +1039,7 @@ async fn a_serving_pool_agent_lets_a_dispatch_run_take_a_shared_lock() {
 
     assert!(dispatch.is_ok(), "a serving agent locks dispatch runs out");
     assert!(
-        RootLock::exclusive(&root).is_none(),
+        RootLock::exclusive(&root).unwrap().is_none(),
         "a sweep could run under the dispatch run"
     );
     stop.send(true).unwrap();
@@ -1067,14 +1067,39 @@ async fn a_restarted_pool_agent_does_not_sweep_a_live_dispatch_run() {
 }
 
 #[tokio::test]
-async fn a_dispatch_run_that_cannot_lock_the_root_fails_instead_of_running_unprotected() {
+async fn a_dispatch_run_waits_for_a_sweep_in_progress_and_then_proceeds() {
     let api = FakeApi::routed(|_, _| leased(30)).await;
     let config = config(&api);
     let root = config.work_root.clone();
-    let _sweeper = {
-        std::fs::create_dir_all(&root).unwrap();
-        RootLock::exclusive(&root).expect("a sweep holds the root")
-    };
+    std::fs::create_dir_all(&root).unwrap();
+    let sweeper = RootLock::exclusive(&root)
+        .unwrap()
+        .expect("a sweep holds the root");
+    let agent = Agent::new(config, TIMINGS, |_, _| async {
+        Ok(RunOutcome::Completed { exit_code: 0 })
+    });
+    let dispatched = tokio::spawn(async move {
+        agent
+            .dispatch("agent-1", &serde_json::json!({}), None)
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!dispatched.is_finished(), "the dispatch did not wait");
+    assert_eq!(count(&api, |r| r.path.contains("dispatch")), 0);
+    drop(sweeper);
+
+    assert_eq!(dispatched.await.unwrap().unwrap(), Ended::RunDone);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_dispatch_run_fails_when_the_root_cannot_be_locked_for_another_reason() {
+    let api = FakeApi::routed(|_, _| leased(30)).await;
+    let mut config = config(&api);
+    let file = std::env::temp_dir().join(format!("ferrfleet-notadir-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&file, b"x").unwrap();
+    config.work_root = file.clone();
     let agent = Agent::new(config, TIMINGS, |_, _| async {
         Ok(RunOutcome::Completed { exit_code: 0 })
     });
@@ -1085,5 +1110,5 @@ async fn a_dispatch_run_that_cannot_lock_the_root_fails_instead_of_running_unpro
 
     assert!(result.is_err());
     assert_eq!(count(&api, |r| r.path.contains("dispatch")), 0);
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&file);
 }

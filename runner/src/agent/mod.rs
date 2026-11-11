@@ -25,8 +25,6 @@ use heartbeat::Heartbeat;
 use pool::{Lease, Poll, PoolClient};
 use workroot::RootLock;
 
-const LOCK_ATTEMPTS: u32 = 20;
-const LOCK_RETRY: Duration = Duration::from_millis(100);
 const USAGE: &str = "usage: ferrfleet-runner agent [--ephemeral]";
 const DISPATCH_USAGE: &str = "usage: ferrfleet-runner dispatch <agent-id> <context-json>";
 
@@ -199,7 +197,9 @@ where
     async fn claim_root(&self, mode: Mode) -> Result<RootLock> {
         let root = &self.config.work_root;
         if mode == Mode::Loop {
-            if let Some(lock) = RootLock::exclusive(root) {
+            let claimed = RootLock::exclusive(root)
+                .with_context(|| format!("could not lock the work root {}", root.display()))?;
+            if let Some(lock) = claimed {
                 let stale = root.clone();
                 if let Err(err) =
                     tokio::task::spawn_blocking(move || workroot::clear_stale(&stale)).await
@@ -250,28 +250,17 @@ where
         let outcome = (self.execute)(env, sender).await;
         drop(heartbeat);
 
-        remove_workdir(&workdir);
+        workroot::remove_workdir(&workdir);
         verdict(outcome)
     }
 }
 
 async fn hold_shared(root: &Path) -> Result<RootLock> {
-    let mut attempts = 0;
-    loop {
-        match RootLock::shared(root) {
-            Ok(lock) => return Ok(lock),
-            Err(err)
-                if err.kind() == std::io::ErrorKind::WouldBlock && attempts < LOCK_ATTEMPTS =>
-            {
-                attempts += 1;
-                tokio::time::sleep(LOCK_RETRY).await;
-            }
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("could not lock the work root {}", root.display()));
-            }
-        }
-    }
+    let owned = root.to_path_buf();
+    tokio::task::spawn_blocking(move || RootLock::shared_waiting(&owned))
+        .await
+        .context("locking the work root did not finish")?
+        .with_context(|| format!("could not lock the work root {}", root.display()))
 }
 
 fn verdict(outcome: Result<RunOutcome>) -> Ended {
@@ -292,16 +281,6 @@ fn verdict(outcome: Result<RunOutcome>) -> Ended {
         Err(err) => {
             error!(?err, "run failed in the runner");
             Ended::RunFailed
-        }
-    }
-}
-
-fn remove_workdir(workdir: &Path) {
-    match std::fs::remove_dir_all(workdir) {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => {
-            warn!(?err, path = %workdir.display(), "could not remove the run's working directory");
         }
     }
 }
