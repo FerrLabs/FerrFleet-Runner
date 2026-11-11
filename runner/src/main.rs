@@ -13,6 +13,7 @@ mod event_queue;
 mod fake_api;
 mod lease;
 mod mcp_config;
+mod mcp_preflight;
 mod private_file;
 mod repo_context;
 mod retry;
