@@ -4,7 +4,7 @@ use crate::event_queue::EventQueue;
 use crate::lease::Lost;
 use crate::private_file::PrivateFile;
 use crate::repo_context::prompt_with_repo_context;
-use crate::{claude_version, mcp_config, usage, workspace};
+use crate::{claude_version, mcp_config, mcp_preflight, usage, workspace};
 use anyhow::{Context, Result};
 use ferrfleet_shared::{ExecutorEvent, RunConfig};
 use std::future::Future;
@@ -104,6 +104,11 @@ fn build_claude_command(
     env: &Env,
     git_credentials: Option<&workspace::GitCredentials>,
 ) -> Result<ClaudeInvocation> {
+    mcp_preflight::check(
+        cfg.mcp_config.as_ref(),
+        cfg.runner_mode,
+        std::env::var_os("PATH").as_deref(),
+    )?;
     let prompt = cfg.prompt_parts();
     let mut cmd = Command::new("claude");
     cmd.arg("-p")
@@ -470,6 +475,25 @@ mod environment_note_tests {
         let path = std::path::Path::new(args[at + 1]);
         assert!(!path.starts_with(&cfg.working_dir));
         assert_eq!(path, invocation.mcp_config.expect("kept alive").path());
+    }
+
+    #[test]
+    fn a_managed_run_with_a_stdio_mcp_server_builds_no_command() {
+        let mut cfg = config(
+            "01999999-9999-7999-9999-999999999991",
+            "/workdir",
+            "abc",
+            None,
+        );
+        cfg.mcp_config = Some(serde_json::json!({
+            "mcpServers": {"grafana": {"command": "mcp-grafana", "args": []}}
+        }));
+
+        let err = build_claude_command(&cfg, &env(&cfg.working_dir), None)
+            .err()
+            .expect("refused");
+
+        assert!(err.to_string().contains("mcp-grafana"));
     }
 
     #[test]
