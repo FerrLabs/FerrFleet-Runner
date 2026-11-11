@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.10.0] - 2026-11-11
+
+### Features
+
+- feat(runner): refuse stdio MCP servers on managed runs (#128)
+
 ## [1.9.0] - 2026-11-11
 
 ### Features
