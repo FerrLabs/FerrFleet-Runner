@@ -17,9 +17,13 @@ mod heartbeat;
 mod pool;
 #[cfg(test)]
 mod tests;
+mod workroot;
+#[cfg(test)]
+mod workroot_props;
 
 use heartbeat::Heartbeat;
 use pool::{Lease, Poll, PoolClient};
+use workroot::RootLock;
 
 const USAGE: &str = "usage: ferrfleet-runner agent [--ephemeral]";
 const DISPATCH_USAGE: &str = "usage: ferrfleet-runner dispatch <agent-id> <context-json>";
@@ -155,6 +159,7 @@ where
     }
 
     pub async fn serve(&self, mode: Mode, mut shutdown: watch::Receiver<bool>) -> Result<Ended> {
+        let _root_lock = self.claim_root(mode).await?;
         let mut retry_delay = self.timings.poll_retry_first;
         loop {
             let poll = tokio::select! {
@@ -189,12 +194,33 @@ where
         }
     }
 
+    async fn claim_root(&self, mode: Mode) -> Result<RootLock> {
+        let root = &self.config.work_root;
+        if mode == Mode::Loop {
+            let claimed = RootLock::exclusive(root)
+                .with_context(|| format!("could not lock the work root {}", root.display()))?;
+            if let Some(lock) = claimed {
+                let stale = root.clone();
+                if let Err(err) =
+                    tokio::task::spawn_blocking(move || workroot::clear_stale(&stale)).await
+                {
+                    warn!(?err, "clearing stale run directories did not finish");
+                }
+                drop(lock);
+            } else {
+                warn!("another runner holds the work root; leaving its run directories alone");
+            }
+        }
+        hold_shared(root).await
+    }
+
     pub async fn dispatch(
         &self,
         agent_id: &str,
         context: &serde_json::Value,
         run_id_file: Option<&Path>,
     ) -> Result<Ended> {
+        let _root_lock = hold_shared(&self.config.work_root).await?;
         let lease = self.pool.dispatch(agent_id, context).await?;
         if let Some(path) = run_id_file
             && let Err(err) = std::fs::write(path, lease.run_id.to_string())
@@ -224,9 +250,17 @@ where
         let outcome = (self.execute)(env, sender).await;
         drop(heartbeat);
 
-        remove_workdir(&workdir);
+        workroot::remove_workdir(&workdir);
         verdict(outcome)
     }
+}
+
+async fn hold_shared(root: &Path) -> Result<RootLock> {
+    let owned = root.to_path_buf();
+    tokio::task::spawn_blocking(move || RootLock::shared_waiting(&owned))
+        .await
+        .context("locking the work root did not finish")?
+        .with_context(|| format!("could not lock the work root {}", root.display()))
 }
 
 fn verdict(outcome: Result<RunOutcome>) -> Ended {
@@ -247,16 +281,6 @@ fn verdict(outcome: Result<RunOutcome>) -> Ended {
         Err(err) => {
             error!(?err, "run failed in the runner");
             Ended::RunFailed
-        }
-    }
-}
-
-fn remove_workdir(workdir: &Path) {
-    match std::fs::remove_dir_all(workdir) {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => {
-            warn!(?err, path = %workdir.display(), "could not remove the run's working directory");
         }
     }
 }
