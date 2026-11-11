@@ -18,9 +18,12 @@ mod pool;
 #[cfg(test)]
 mod tests;
 mod workroot;
+#[cfg(test)]
+mod workroot_props;
 
 use heartbeat::Heartbeat;
 use pool::{Lease, Poll, PoolClient};
+use workroot::RootLock;
 
 const USAGE: &str = "usage: ferrfleet-runner agent [--ephemeral]";
 const DISPATCH_USAGE: &str = "usage: ferrfleet-runner dispatch <agent-id> <context-json>";
@@ -156,9 +159,7 @@ where
     }
 
     pub async fn serve(&self, mode: Mode, mut shutdown: watch::Receiver<bool>) -> Result<Ended> {
-        if mode == Mode::Loop {
-            workroot::clear_stale(&self.config.work_root);
-        }
+        let _root_lock = self.claim_root(mode).await;
         let mut retry_delay = self.timings.poll_retry_first;
         loop {
             let poll = tokio::select! {
@@ -193,12 +194,30 @@ where
         }
     }
 
+    async fn claim_root(&self, mode: Mode) -> Option<RootLock> {
+        let root = &self.config.work_root;
+        if mode == Mode::Loop {
+            if let Some(lock) = RootLock::exclusive(root) {
+                let stale = root.clone();
+                if let Err(err) =
+                    tokio::task::spawn_blocking(move || workroot::clear_stale(&stale)).await
+                {
+                    warn!(?err, "clearing stale run directories did not finish");
+                }
+                return Some(lock);
+            }
+            warn!("another runner holds the work root; leaving its run directories alone");
+        }
+        RootLock::shared(root)
+    }
+
     pub async fn dispatch(
         &self,
         agent_id: &str,
         context: &serde_json::Value,
         run_id_file: Option<&Path>,
     ) -> Result<Ended> {
+        let _root_lock = RootLock::shared(&self.config.work_root);
         let lease = self.pool.dispatch(agent_id, context).await?;
         if let Some(path) = run_id_file
             && let Err(err) = std::fs::write(path, lease.run_id.to_string())
