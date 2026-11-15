@@ -159,8 +159,17 @@ jobs:
       - name: The memory cap logic
         run: tests/cbmc_limit.sh
 
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
       - name: Build the image
-        run: docker build --target formal --tag ferrfleet-runner-formal:ci .
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: formal
+          load: true
+          tags: ferrfleet-runner-formal:ci
+          cache-from: type=gha,scope=formal
+          cache-to: type=gha,scope=formal,mode=max
 
       - name: The toolchain, Kani and FerrFlow run as the runner user
         run: |
