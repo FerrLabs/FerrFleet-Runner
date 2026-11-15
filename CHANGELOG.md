@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.12.0] - 2026-11-15
+
+### Features
+
+- feat(runner): report CPU and memory usage in the heartbeat (#133)
+
 ## [1.11.0] - 2026-11-15
 
 ### Features
