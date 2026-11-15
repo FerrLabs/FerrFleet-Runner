@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.11.0] - 2026-11-15
+
+### Features
+
+- feat(formal): persistent build cache for the formal image (#132)
+
 ## [1.10.0] - 2026-11-11
 
 ### Features
