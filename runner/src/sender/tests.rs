@@ -186,3 +186,35 @@ async fn without_a_lease_a_conflict_does_not_silence_the_sender() {
     assert_eq!(sender.lost(), None);
     assert_eq!(api.received().len(), 2);
 }
+
+#[tokio::test]
+async fn a_heartbeat_carries_the_resources_when_there_are_some() {
+    use crate::resources::Resources;
+    let api = FakeApi::start(|_| Reply::status(200)).await;
+    let resources: Resources = serde_json::from_value(serde_json::json!({
+        "cpu_limit_millicores": 2000,
+        "memory_limit_bytes": null,
+        "cpu_avg_millicores": 150,
+        "cpu_peak_millicores": 900,
+        "memory_avg_bytes": 1000,
+        "memory_peak_bytes": 2000,
+        "samples": 4,
+    }))
+    .unwrap();
+
+    sender(&api.url).heartbeat(Some(&resources)).await.unwrap();
+
+    let body: serde_json::Value = serde_json::from_str(&api.received()[0].body).unwrap();
+    assert_eq!(body["resources"]["cpu_limit_millicores"], 2000);
+    assert!(body["resources"]["memory_limit_bytes"].is_null());
+    assert_eq!(body["resources"]["samples"], 4);
+}
+
+#[tokio::test]
+async fn a_heartbeat_without_resources_has_no_body() {
+    let api = FakeApi::start(|_| Reply::status(200)).await;
+
+    sender(&api.url).heartbeat(None).await.unwrap();
+
+    assert_eq!(api.received()[0].body, "");
+}

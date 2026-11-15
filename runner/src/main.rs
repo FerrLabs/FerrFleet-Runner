@@ -16,6 +16,7 @@ mod mcp_config;
 mod mcp_preflight;
 mod private_file;
 mod repo_context;
+mod resources;
 mod retry;
 mod review_threads;
 mod sender;

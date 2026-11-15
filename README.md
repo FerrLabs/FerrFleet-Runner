@@ -270,7 +270,12 @@ What happens to each run:
    token is not used again for that run, and is removed from the environment of
    `claude`, `git` and everything the agent starts.
 3. From the lease until the run ends, the runner heartbeats with the run token at
-   the interval FerrFleet asks for.
+   the interval FerrFleet asks for. Each heartbeat carries a `resources` object
+   when the container's cgroup (v2, or v1) is readable: the CPU and memory
+   capacity (the cgroup limit, else the host total), and the average and peak
+   CPU (millicores) and memory (bytes) of the whole container, sampled every 5
+   seconds since the run started. The field is left out when no cgroup is
+   readable.
 4. When FerrFleet takes the run back (a `410` on the heartbeat because it was
    cancelled or superseded, or a `409` on any route because this runner lost the
    lease), the runner kills `claude`, reports nothing more for that run, and goes
