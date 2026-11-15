@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use ferrfleet_shared::{ExecutorEvent, RunConfig};
 use reqwest::{RequestBuilder, Response};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::config::Env;
 use crate::lease::{LeaseState, Lost, Stopped};
+use crate::resources::Resources;
 use crate::retry::{self, Backoff};
 
 #[cfg(test)]
@@ -15,6 +16,11 @@ mod tests;
 #[derive(Debug, Deserialize)]
 struct GithubTokenResponse {
     token: String,
+}
+
+#[derive(Serialize)]
+struct HeartbeatBody<'a> {
+    resources: Option<&'a Resources>,
 }
 
 #[derive(Clone)]
@@ -97,13 +103,20 @@ impl EventSender {
         Ok(resp)
     }
 
-    pub async fn heartbeat(&self) -> Result<()> {
+    pub async fn heartbeat(&self, resources: Option<&Resources>) -> Result<()> {
         let url = format!("{}/runs/{}/heartbeat", self.env.api_url, self.env.run_id);
-        self.execute(|| self.client.post(&url).bearer_auth(&self.env.run_token))
-            .await
-            .with_context(|| format!("POST {url}"))?
-            .error_for_status()
-            .with_context(|| format!("non-2xx from {url}"))?;
+        let body = HeartbeatBody { resources };
+        self.execute(|| {
+            let request = self.client.post(&url).bearer_auth(&self.env.run_token);
+            match resources {
+                Some(_) => request.json(&body),
+                None => request,
+            }
+        })
+        .await
+        .with_context(|| format!("POST {url}"))?
+        .error_for_status()
+        .with_context(|| format!("non-2xx from {url}"))?;
         Ok(())
     }
 
