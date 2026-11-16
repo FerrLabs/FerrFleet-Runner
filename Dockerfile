@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.99-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS builder
+FROM rust:1.100-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS builder
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
@@ -90,7 +90,7 @@ RUN curl -fsSL -o /tmp/sccache.tar.gz \
  && rm -rf /tmp/sccache.tar.gz "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl" \
  && sccache --version
 
-COPY --from=ghcr.io/ferrlabs/ferrflow:7.35.6@sha256:d67d0844a206a4f6104c4d082ad29253b57d2a56526ec777192535618a25a75b /usr/local/bin/ferrflow /usr/local/bin/ferrflow
+COPY --from=ghcr.io/ferrlabs/ferrflow:7.36.7@sha256:684a1e4dc573efa08b383796812e5b412119eeeaf0e3c83349dfffda71c8317d /usr/local/bin/ferrflow /usr/local/bin/ferrflow
 
 ENV CARGO_HOME=/tmp/cargo \
     KANI_HOME=/home/runner/.kani
