@@ -1,5 +1,7 @@
+pub mod effort;
 pub mod prompt;
 pub mod runner_mode;
+pub use effort::Effort;
 pub use prompt::PromptParts;
 pub use runner_mode::RunnerMode;
 
@@ -31,6 +33,8 @@ pub struct RunConfig {
     pub session_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default, deserialize_with = "effort::lenient")]
+    pub effort: Option<Effort>,
     #[serde(default)]
     pub mcp_config: Option<serde_json::Value>,
     /// How the CLI decides whether a tool call may proceed.
