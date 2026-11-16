@@ -142,6 +142,9 @@ fn build_claude_command(
     if let Some(model) = &cfg.model {
         cmd.arg("--model").arg(model);
     }
+    if let Some(effort) = cfg.effort {
+        cmd.arg("--effort").arg(effort.as_str());
+    }
     if let Some(sid) = &cfg.session_id {
         cmd.arg("-r").arg(sid);
     }
@@ -393,6 +396,44 @@ mod environment_note_tests {
             .get_envs()
             .any(|(key, value)| key == INSIDE_AGENT_VAR && value.is_some());
         assert!(marked);
+    }
+
+    fn effort_args(cfg: &RunConfig) -> Vec<String> {
+        let invocation = build_claude_command(cfg, &env(&cfg.working_dir), None).expect("building");
+        let args: Vec<String> = invocation
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        args.iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "--effort")
+            .map(|(i, _)| args[i + 1].clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_run_without_effort_passes_no_flag() {
+        let cfg = config(
+            "00000000-0000-0000-0000-000000000001",
+            "/workdir",
+            "abc",
+            None,
+        );
+        assert_eq!(effort_args(&cfg), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_effort_is_passed_to_the_cli_once() {
+        let mut cfg = config(
+            "00000000-0000-0000-0000-000000000001",
+            "/workdir",
+            "abc",
+            None,
+        );
+        cfg.effort = Some(ferrfleet_shared::Effort::Xhigh);
+        assert_eq!(effort_args(&cfg), vec!["xhigh".to_owned()]);
     }
 
     fn stdin_prompt(cfg: &RunConfig) -> String {
