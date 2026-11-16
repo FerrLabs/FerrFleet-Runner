@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.13.0] - 2026-11-16
+
+### Features
+
+- feat(runner): pass the run effort to the claude CLI (#136)
+
 ## [1.12.0] - 2026-11-15
 
 ### Features
