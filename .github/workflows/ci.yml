@@ -47,7 +47,7 @@ jobs:
 
   kani:
     name: Kani
-    uses: FerrLabs/.github/.github/workflows/reusable-kani.yml@d0c70730b0b7234aafc7cffd1cba606313d241ff # main
+    uses: FerrLabs/.github/.github/workflows/reusable-kani.yml@52d6593a2a7b5d6742d1dd68fddb01bb82282c18 # main
 
   deny:
     name: Cargo Security
@@ -279,6 +279,6 @@ jobs:
     permissions:
       contents: write
       id-token: write
-    uses: FerrLabs/.github/.github/workflows/reusable-ferrflow-release.yml@d0c70730b0b7234aafc7cffd1cba606313d241ff # main
+    uses: FerrLabs/.github/.github/workflows/reusable-ferrflow-release.yml@52d6593a2a7b5d6742d1dd68fddb01bb82282c18 # main
     secrets:
       TAG_SIGNING_KEY: ${{ secrets.TAG_SIGNING_KEY }}
