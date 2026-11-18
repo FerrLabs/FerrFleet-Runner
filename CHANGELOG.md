@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.13.1] - 2026-11-18
+
+### Bug Fixes
+
+- fix(deps): replace unmaintained chrono with time (RUSTSEC-2026-0543) (#139)
+
 ## [1.13.0] - 2026-11-16
 
 ### Features

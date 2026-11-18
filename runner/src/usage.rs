@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
-use chrono::{DateTime, Utc};
 use ferrfleet_shared::ExecutorEvent;
 use serde_json::Value;
+use time::OffsetDateTime;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Tokens {
@@ -60,7 +60,7 @@ impl Tokens {
         }
     }
 
-    fn into_event(self, timestamp: DateTime<Utc>) -> Option<ExecutorEvent> {
+    fn into_event(self, timestamp: OffsetDateTime) -> Option<ExecutorEvent> {
         if self == Self::default() {
             return None;
         }
@@ -81,7 +81,7 @@ pub struct UsageLedger {
 }
 
 impl UsageLedger {
-    pub fn on_assistant(&mut self, line: &Value, now: DateTime<Utc>) -> Option<ExecutorEvent> {
+    pub fn on_assistant(&mut self, line: &Value, now: OffsetDateTime) -> Option<ExecutorEvent> {
         let message = line.get("message")?;
         let usage = message.get("usage")?;
         let id = message.get("id").and_then(Value::as_str)?;
@@ -96,7 +96,7 @@ impl UsageLedger {
         step.into_event(now)
     }
 
-    pub fn on_result(&mut self, line: &Value, now: DateTime<Utc>) -> Option<ExecutorEvent> {
+    pub fn on_result(&mut self, line: &Value, now: OffsetDateTime) -> Option<ExecutorEvent> {
         let total = match line.get("modelUsage").and_then(Value::as_object) {
             Some(models) if !models.is_empty() => Tokens::from_model_usage(models),
             _ => Tokens::from_usage(line.get("usage")?),
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn lines_of_one_response_are_counted_once() {
         let mut ledger = UsageLedger::default();
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
 
         let first = ledger.on_assistant(&assistant("msg_1", 100, 1, 2000), now);
         let second = ledger.on_assistant(&assistant("msg_1", 100, 1, 2000), now);
@@ -174,7 +174,7 @@ mod tests {
     #[test]
     fn a_step_without_an_id_is_left_to_the_result() {
         let mut ledger = UsageLedger::default();
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         let anonymous = json!({"type": "assistant", "message": {"usage": {"input_tokens": 100}}});
 
         assert!(ledger.on_assistant(&anonymous, now).is_none());
@@ -189,7 +189,7 @@ mod tests {
     fn the_placeholder_output_count_is_not_reported_while_streaming() {
         let mut ledger = UsageLedger::default();
 
-        let step = ledger.on_assistant(&assistant("msg_1", 10, 8, 0), Utc::now());
+        let step = ledger.on_assistant(&assistant("msg_1", 10, 8, 0), OffsetDateTime::now_utc());
 
         assert_eq!(tokens(step).1, 0);
     }
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn the_result_only_adds_what_the_steps_did_not_report() {
         let mut ledger = UsageLedger::default();
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         ledger.on_assistant(&assistant("msg_1", 100, 1, 2000), now);
         ledger.on_assistant(&assistant("msg_2", 50, 1, 2100), now);
 
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn subagent_spend_comes_from_model_usage() {
         let mut ledger = UsageLedger::default();
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         ledger.on_assistant(&assistant("msg_1", 100, 1, 0), now);
 
         let result = json!({
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn a_run_is_charged_its_total_exactly_once() {
         let mut ledger = UsageLedger::default();
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         let mut sum = (0, 0, 0, 0);
         let mut add = |event| {
             let (i, o, c, r) = tokens(event);

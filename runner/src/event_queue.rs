@@ -69,8 +69,8 @@ impl EventQueue {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use chrono::Utc;
     use ferrfleet_shared::ExecutorEvent;
+    use time::OffsetDateTime;
 
     use super::EventQueue;
     use crate::fake_api::{FakeApi, RUN_ID, Received, Reply, dead_api_url, sender};
@@ -80,7 +80,7 @@ mod tests {
     fn message(n: usize) -> ExecutorEvent {
         ExecutorEvent::AssistantMessage {
             content: n.to_string(),
-            timestamp: Utc::now(),
+            timestamp: OffsetDateTime::now_utc(),
         }
     }
 
