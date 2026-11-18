@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
 use ferrfleet_shared::ExecutorEvent;
 use serde_json::Value;
+use time::OffsetDateTime;
 
 use crate::usage::UsageLedger;
 
 pub fn translate(line: &str, usage: &mut UsageLedger) -> Result<Vec<ExecutorEvent>> {
     let value: Value = serde_json::from_str(line).context("parsing claude json line")?;
-    let now = Utc::now();
+    let now = OffsetDateTime::now_utc();
     let mut out = Vec::new();
 
     let kind = value
@@ -90,11 +90,7 @@ pub fn translate(line: &str, usage: &mut UsageLedger) -> Result<Vec<ExecutorEven
     Ok(out)
 }
 
-fn push_assistant_content(
-    content: &Value,
-    now: chrono::DateTime<Utc>,
-    out: &mut Vec<ExecutorEvent>,
-) {
+fn push_assistant_content(content: &Value, now: OffsetDateTime, out: &mut Vec<ExecutorEvent>) {
     if let Some(items) = content.as_array() {
         for item in items {
             let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
@@ -184,11 +180,7 @@ fn elide_image_payloads(value: &mut Value) {
     }
 }
 
-fn push_user_tool_results(
-    content: &Value,
-    now: chrono::DateTime<Utc>,
-    out: &mut Vec<ExecutorEvent>,
-) {
+fn push_user_tool_results(content: &Value, now: OffsetDateTime, out: &mut Vec<ExecutorEvent>) {
     let Some(items) = content.as_array() else {
         return;
     };
