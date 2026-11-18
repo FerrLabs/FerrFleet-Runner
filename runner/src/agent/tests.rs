@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
 use ferrfleet_shared::ExecutorEvent;
+use time::OffsetDateTime;
 use tokio::sync::watch;
 
 use super::workroot::RootLock;
@@ -98,7 +98,7 @@ async fn eventually(api: &FakeApi, what: &str, done: impl Fn(&[Received]) -> boo
 fn event() -> ExecutorEvent {
     ExecutorEvent::AssistantMessage {
         content: "working".to_owned(),
-        timestamp: Utc::now(),
+        timestamp: OffsetDateTime::now_utc(),
     }
 }
 

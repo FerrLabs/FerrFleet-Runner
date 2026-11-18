@@ -5,8 +5,8 @@ pub use effort::Effort;
 pub use prompt::PromptParts;
 pub use runner_mode::RunnerMode;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,30 +159,35 @@ pub enum ExecutorEvent {
         /// a run — neither for cost attribution nor for comparing two models.
         #[serde(default)]
         model: Option<String>,
-        timestamp: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
     },
     AssistantMessage {
         content: String,
-        timestamp: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
     },
     ToolUse {
         tool_name: String,
         tool_use_id: String,
         input: serde_json::Value,
-        timestamp: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
     },
     ToolResult {
         tool_use_id: String,
         output: serde_json::Value,
         is_error: bool,
-        timestamp: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
     },
     Usage {
         input_tokens: u32,
         output_tokens: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
-        timestamp: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
     },
     Error {
         message: String,
@@ -197,12 +202,14 @@ pub enum ExecutorEvent {
         /// on (an ordinary GitHub API "rate limit" would otherwise trip it).
         #[serde(default)]
         provider_signal: bool,
-        timestamp: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
     },
     Completed {
         exit_code: i32,
         session_id: Option<String>,
-        timestamp: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
     },
 }
 
@@ -285,7 +292,7 @@ mod tests {
             output_tokens: 200,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 50,
-            timestamp: Utc::now(),
+            timestamp: OffsetDateTime::now_utc(),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(json.contains("\"type\":\"usage\""));
@@ -301,6 +308,24 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn event_timestamps_use_the_rfc3339_wire_format() {
+        let json =
+            r#"{"type":"assistant_message","content":"hi","timestamp":"2026-11-18T09:30:00.5Z"}"#;
+        let parsed: ExecutorEvent = serde_json::from_str(json).unwrap();
+        let ExecutorEvent::AssistantMessage { timestamp, .. } = parsed else {
+            panic!("wrong variant");
+        };
+        assert_eq!(timestamp.unix_timestamp(), 1_794_994_200);
+        assert_eq!(timestamp.millisecond(), 500);
+        let reserialized = serde_json::to_value(ExecutorEvent::AssistantMessage {
+            content: "hi".into(),
+            timestamp,
+        })
+        .unwrap();
+        assert_eq!(reserialized["timestamp"], "2026-11-18T09:30:00.5Z");
     }
 
     #[test]

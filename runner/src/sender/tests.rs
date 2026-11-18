@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
 use ferrfleet_shared::ExecutorEvent;
+use time::OffsetDateTime;
 
 use super::{Claim, EventSender};
 use crate::fake_api::{FAST, FakeApi, RUN_ID, Reply, dead_api_url, sender};
@@ -11,7 +11,7 @@ use crate::retry::Backoff;
 fn event() -> ExecutorEvent {
     ExecutorEvent::AssistantMessage {
         content: "hello".to_owned(),
-        timestamp: Utc::now(),
+        timestamp: OffsetDateTime::now_utc(),
     }
 }
 
