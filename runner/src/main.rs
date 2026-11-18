@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
 use ferrfleet_shared::{ExecutorEvent, RunConfig, pricing};
+use time::OffsetDateTime;
 use tracing::{error, info, warn};
 
 mod agent;
@@ -96,12 +96,12 @@ async fn supervise(env: &Env, sender: &EventSender) -> Result<RunOutcome> {
             queue.push(ExecutorEvent::Error {
                 message: err.to_string(),
                 provider_signal: false,
-                timestamp: Utc::now(),
+                timestamp: OffsetDateTime::now_utc(),
             });
             queue.push(ExecutorEvent::Completed {
                 exit_code: 1,
                 session_id: None,
-                timestamp: Utc::now(),
+                timestamp: OffsetDateTime::now_utc(),
             });
             Err(err)
         }
@@ -172,7 +172,7 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<RunO
             queue.push(ExecutorEvent::Error {
                 message: format!("claude execution failed: {err:#}"),
                 provider_signal: false,
-                timestamp: Utc::now(),
+                timestamp: OffsetDateTime::now_utc(),
             });
             -1
         }
@@ -216,7 +216,7 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<RunO
                       the run produced no output (check credentials and MCP servers)"
                 .to_owned(),
             provider_signal: false,
-            timestamp: Utc::now(),
+            timestamp: OffsetDateTime::now_utc(),
         });
         1
     } else {
@@ -226,7 +226,7 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<RunO
     queue.push(ExecutorEvent::Completed {
         exit_code,
         session_id,
-        timestamp: Utc::now(),
+        timestamp: OffsetDateTime::now_utc(),
     });
     Ok(RunOutcome::Completed { exit_code })
 }

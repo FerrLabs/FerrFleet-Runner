@@ -13,7 +13,7 @@ ferrfleet-shared = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
+time = { workspace = true }
 uuid = { workspace = true }
 fs4 = { workspace = true }
 anyhow = { workspace = true }
