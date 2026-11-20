@@ -32,7 +32,14 @@ look for another way around it. Available CLI tools are `git`, `curl`, `jq`, \
 may write there and in /tmp, nowhere else. When a repository is checked \
 out, `git push` is already authenticated: push with plain `git push -u origin \
 HEAD`, never with a token in the remote URL, and never with --force. \
-`ferrfleet-runner pull-request <url>` records the pull request you opened, \
+When a branch is already checked out for you, it is the run's branch: keep it, \
+never rename it (no `git branch -m`, no `git checkout -b` to another name), \
+push that exact branch name, and open the pull request from it, because a pull \
+request from any other branch is refused. \
+`ferrfleet-runner pull-request <url>` records the pull request you opened; it \
+exits non-zero and prints the HTTP status and response body when the API refuses \
+it, in which case the pull request is NOT recorded: report the failure and its \
+message in your result instead of continuing silently. \
 `ferrfleet-runner resolve-thread <thread_id>` resolves one review thread, and \
 `ferrfleet-runner result '<json>'` records what you concluded, as a JSON \
 object, for whatever reads this run next. Record one when the task has an \
@@ -617,6 +624,20 @@ mod environment_note_tests {
     fn the_note_forbids_gh_without_claiming_it_is_absent() {
         assert!(RUNNER_ENVIRONMENT_NOTE.contains("Do NOT use the GitHub CLI (`gh`)"));
         assert!(!RUNNER_ENVIRONMENT_NOTE.contains("is NOT installed"));
+    }
+
+    #[test]
+    fn the_note_tells_the_agent_to_keep_and_push_the_prepared_branch() {
+        assert!(RUNNER_ENVIRONMENT_NOTE.contains("keep it, never rename it"));
+        assert!(RUNNER_ENVIRONMENT_NOTE.contains("push that exact branch name"));
+        assert!(RUNNER_ENVIRONMENT_NOTE.contains("open the pull request from it"));
+    }
+
+    #[test]
+    fn the_note_tells_the_agent_to_report_a_failed_pull_request_registration() {
+        assert!(
+            RUNNER_ENVIRONMENT_NOTE.contains("report the failure and its message in your result")
+        );
     }
 }
 
