@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ferrfleet_shared::{ExecutorEvent, RunConfig};
 use reqwest::{RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
@@ -157,17 +157,21 @@ impl EventSender {
     pub async fn report_pull_request(&self, url: &str) -> Result<()> {
         let endpoint = format!("{}/runs/{}/pull-request", self.env.api_url, self.env.run_id);
         let body = serde_json::json!({ "url": url });
-        self.execute(|| {
-            self.client
-                .post(&endpoint)
-                .bearer_auth(&self.env.run_token)
-                .json(&body)
-        })
-        .await
-        .with_context(|| format!("POST {endpoint}"))?
-        .error_for_status()
-        .with_context(|| format!("non-2xx from {endpoint}"))?;
-        Ok(())
+        let resp = self
+            .execute(|| {
+                self.client
+                    .post(&endpoint)
+                    .bearer_auth(&self.env.run_token)
+                    .json(&body)
+            })
+            .await
+            .with_context(|| format!("POST {endpoint}"))?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let detail = resp.text().await.unwrap_or_default();
+        bail!("POST {endpoint} was refused with {status}: {detail}")
     }
 
     pub async fn report_result(&self, result: &serde_json::Value) -> Result<()> {

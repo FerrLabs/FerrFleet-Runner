@@ -78,7 +78,10 @@ pub(crate) async fn pull_request(args: &[String]) -> Result<()> {
         .context("usage: ferrfleet-runner pull-request <url>")?;
 
     let env = Env::from_env().context("loading environment")?;
-    let sender = EventSender::new(env);
+    register_pull_request(&EventSender::new(env), url).await
+}
+
+async fn register_pull_request(sender: &EventSender, url: &str) -> Result<()> {
     sender
         .report_pull_request(url)
         .await
@@ -136,5 +139,48 @@ mod result_argument_tests {
     fn a_missing_file_says_which_one() {
         let err = read_result_argument("@/nope/missing.json").unwrap_err();
         assert!(format!("{err}").contains("missing.json"));
+    }
+}
+
+#[cfg(test)]
+mod pull_request_tests {
+    use super::*;
+    use crate::fake_api::{FakeApi, Reply, sender};
+
+    #[tokio::test]
+    async fn a_refused_pull_request_fails_with_the_status_and_the_body() {
+        let api = FakeApi::start(|_| {
+            Reply::text(
+                403,
+                r#"{"error":"head branch is not ferrfleet/ticket-ft-1"}"#,
+            )
+        })
+        .await;
+
+        let err = register_pull_request(&sender(&api.url), "https://github.com/o/r/pull/1")
+            .await
+            .expect_err("a 403 must not read as a registered pull request");
+
+        let shown = format!("{err:?}");
+        assert!(shown.contains("403"), "status missing from: {shown}");
+        assert!(
+            shown.contains("head branch is not ferrfleet/ticket-ft-1"),
+            "body missing from: {shown}"
+        );
+        assert_eq!(api.received().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_accepted_pull_request_posts_the_url_and_succeeds() {
+        let api = FakeApi::start(|_| Reply::status(204)).await;
+
+        register_pull_request(&sender(&api.url), "https://github.com/o/r/pull/1")
+            .await
+            .expect("a 2xx registers the pull request");
+
+        let received = api.received();
+        assert_eq!(received[0].method, "POST");
+        assert!(received[0].path.ends_with("/pull-request"));
+        assert!(received[0].body.contains("https://github.com/o/r/pull/1"));
     }
 }
