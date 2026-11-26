@@ -307,6 +307,10 @@ killed before that, the heartbeats stop and FerrFleet settles the run itself
 after the lease lapses: a run not yet claimed goes back to the pool, a claimed
 one is marked failed rather than run twice.
 
+`ferrfleet-runner` without a subcommand executes a single run and does not wait
+for it: on `SIGTERM` or `SIGINT` it kills `claude` and everything it started, and
+exits `1`. FerrFleet settles the run after the lease lapses, as above.
+
 ## Formal verification image
 
 `ghcr.io/ferrlabs/ferrfleet/runner-formal` is the runner image plus what an agent

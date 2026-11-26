@@ -883,6 +883,24 @@ mod stop_tests {
     }
 
     #[tokio::test]
+    async fn abandoning_the_stream_kills_claude_and_what_it_started() {
+        let stub = Stub::new("exec sleep 300");
+        let child = stub.spawn();
+        let claude = i32::try_from(child.id().expect("a running child has a pid")).expect("pid");
+        let grandchild = stub.grandchild().await;
+
+        let abandoned = tokio::time::timeout(
+            Duration::from_millis(100),
+            stream(child, Duration::from_secs(60), None),
+        )
+        .await;
+
+        assert!(abandoned.is_err(), "the stream ended on its own");
+        assert_killed(claude).await;
+        assert_killed(grandchild).await;
+    }
+
+    #[tokio::test]
     async fn a_lost_lease_kills_claude_instead_of_waiting_for_it() {
         let child = Command::new("sleep")
             .arg("30")
