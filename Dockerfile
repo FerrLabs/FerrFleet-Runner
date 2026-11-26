@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.100-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS builder
+FROM rust:1.100-bookworm@sha256:75d26c23c24cc6ea1cdabf0714a6bff8fd7bf3248716043fd7ae86dac7f41b94 AS builder
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
@@ -8,7 +8,7 @@ COPY runner ./runner
 
 RUN cargo build --release --bin ferrfleet-runner
 
-FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
+FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e AS runtime
 
 # `image.source` is what the GHCR package page links to. Without it the package
 # keeps whatever repository first published it, which here was the private
@@ -90,7 +90,7 @@ RUN curl -fsSL -o /tmp/sccache.tar.gz \
  && rm -rf /tmp/sccache.tar.gz "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl" \
  && sccache --version
 
-COPY --from=ghcr.io/ferrlabs/ferrflow:7.36.7@sha256:684a1e4dc573efa08b383796812e5b412119eeeaf0e3c83349dfffda71c8317d /usr/local/bin/ferrflow /usr/local/bin/ferrflow
+COPY --from=ghcr.io/ferrlabs/ferrflow:7.37.5@sha256:d9cd13f2ff2d5f91e98ce635bbc5b0d52a54b4a72ab32a2510238080ee00349f /usr/local/bin/ferrflow /usr/local/bin/ferrflow
 
 ENV CARGO_HOME=/tmp/cargo \
     KANI_HOME=/home/runner/.kani
