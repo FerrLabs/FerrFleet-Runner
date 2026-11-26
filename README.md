@@ -301,7 +301,8 @@ it, or the pool token was refused.
 ### Stopping a runner
 
 On `SIGTERM` or `SIGINT` the runner stops polling. A run in progress is left to
-finish, within the run's own timeout, and its heartbeats carry on until then.
+finish, within the run's own timeout, and its heartbeats carry on until then. `claude`
+runs in its own process group, so a Ctrl-C in the terminal does not reach it.
 Give the process a grace period that matches your agents' timeout. If it is
 killed before that, the heartbeats stop and FerrFleet settles the run itself
 after the lease lapses: a run not yet claimed goes back to the pool, a claimed

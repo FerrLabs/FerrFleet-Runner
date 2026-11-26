@@ -730,39 +730,36 @@ mod stdin_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod stop_tests {
     use super::*;
     use crate::fake_api;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     struct Stub {
-        script: PathBuf,
+        script: String,
         grandchild_pid: PathBuf,
     }
 
     impl Stub {
         fn new(body: &str) -> Self {
-            let id = uuid::Uuid::new_v4();
-            let dir = std::env::temp_dir();
-            let stub = Self {
-                script: dir.join(format!("ferrfleet-stub-{id}")),
-                grandchild_pid: dir.join(format!("ferrfleet-stub-{id}.pid")),
-            };
+            let grandchild_pid =
+                std::env::temp_dir().join(format!("ferrfleet-stub-{}.pid", uuid::Uuid::new_v4()));
             let script = format!(
-                "#!/bin/sh\nsleep 300 </dev/null >/dev/null 2>&1 &\necho $! > {}\n{body}\n",
-                stub.grandchild_pid.display()
+                "sleep 300 </dev/null >/dev/null 2>&1 &\necho $! > {}\n{body}\n",
+                grandchild_pid.display()
             );
-            std::fs::write(&stub.script, script).expect("writing the stub");
-            std::fs::set_permissions(&stub.script, std::fs::Permissions::from_mode(0o700))
-                .expect("making the stub executable");
-            stub
+            Self {
+                script,
+                grandchild_pid,
+            }
         }
 
         fn spawn(&self) -> Child {
-            let mut command = Command::new(&self.script);
+            let mut command = Command::new("sh");
             command
+                .arg("-c")
+                .arg(&self.script)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -789,7 +786,6 @@ mod stop_tests {
 
     impl Drop for Stub {
         fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.script);
             let _ = std::fs::remove_file(&self.grandchild_pid);
         }
     }
