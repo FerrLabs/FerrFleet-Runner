@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 time = { workspace = true }
 uuid = { workspace = true }
 fs4 = { workspace = true }
+rustix = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

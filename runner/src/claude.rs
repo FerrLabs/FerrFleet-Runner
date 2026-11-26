@@ -7,6 +7,7 @@ use crate::repo_context::prompt_with_repo_context;
 use crate::{claude_version, mcp_config, mcp_preflight, usage, workspace};
 use anyhow::{Context, Result};
 use ferrfleet_shared::{ExecutorEvent, RunConfig};
+use rustix::process::{Pid, Signal, kill_process_group};
 use std::future::Future;
 use std::process::Stdio;
 use std::time::Duration;
@@ -220,7 +221,10 @@ struct ClaudeInvocation {
 }
 
 fn spawn_with_prompt(mut command: Command, prompt: String) -> Result<Child> {
-    let mut child = command.spawn().context("spawning claude CLI")?;
+    let mut child = command
+        .process_group(0)
+        .spawn()
+        .context("spawning claude CLI")?;
     let mut stdin = child.stdin.take().context("claude stdin missing")?;
     tokio::spawn(async move {
         if let Err(err) = stdin.write_all(prompt.as_bytes()).await {
@@ -251,6 +255,24 @@ pub(crate) async fn spawn_and_stream(
     stream_child(child, queue, totals, session_id, timeout, stop).await
 }
 
+struct ProcessGroup(Pid);
+
+impl ProcessGroup {
+    fn led_by(child: &Child) -> Option<Self> {
+        child
+            .id()
+            .and_then(|id| i32::try_from(id).ok())
+            .and_then(Pid::from_raw)
+            .map(Self)
+    }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        let _ = kill_process_group(self.0, Signal::KILL);
+    }
+}
+
 async fn stream_child(
     mut child: Child,
     queue: &EventQueue,
@@ -259,6 +281,7 @@ async fn stream_child(
     timeout: Duration,
     stop: impl Future<Output = Lost>,
 ) -> Result<Streamed> {
+    let group = ProcessGroup::led_by(&child);
     let stdout = child.stdout.take().context("claude stdout missing")?;
     let stderr = child.stderr.take().context("claude stderr missing")?;
     let mut reader = BufReader::new(stdout).lines();
@@ -335,6 +358,7 @@ async fn stream_child(
             .code()
             .unwrap_or(-1),
         Ok(Err(err)) => {
+            drop(group);
             let _ = stderr_task.await;
             return Err(err);
         }
@@ -345,6 +369,7 @@ async fn stream_child(
         }
     };
 
+    drop(group);
     let _ = stderr_task.await;
     Ok(Streamed::Exited(exit_code))
 }
@@ -709,6 +734,153 @@ mod stdin_tests {
 mod stop_tests {
     use super::*;
     use crate::fake_api;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    struct Stub {
+        script: PathBuf,
+        grandchild_pid: PathBuf,
+    }
+
+    impl Stub {
+        fn new(body: &str) -> Self {
+            let id = uuid::Uuid::new_v4();
+            let dir = std::env::temp_dir();
+            let stub = Self {
+                script: dir.join(format!("ferrfleet-stub-{id}")),
+                grandchild_pid: dir.join(format!("ferrfleet-stub-{id}.pid")),
+            };
+            let script = format!(
+                "#!/bin/sh\nsleep 300 </dev/null >/dev/null 2>&1 &\necho $! > {}\n{body}\n",
+                stub.grandchild_pid.display()
+            );
+            std::fs::write(&stub.script, script).expect("writing the stub");
+            std::fs::set_permissions(&stub.script, std::fs::Permissions::from_mode(0o700))
+                .expect("making the stub executable");
+            stub
+        }
+
+        fn spawn(&self) -> Child {
+            let mut command = Command::new(&self.script);
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            spawn_with_prompt(command, String::new()).expect("spawning the stub")
+        }
+
+        async fn grandchild(&self) -> i32 {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(pid) = std::fs::read_to_string(&self.grandchild_pid)
+                    .ok()
+                    .and_then(|raw| raw.trim().parse().ok())
+                {
+                    return pid;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the stub never started its background process"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    impl Drop for Stub {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.script);
+            let _ = std::fs::remove_file(&self.grandchild_pid);
+        }
+    }
+
+    fn running(pid: i32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            !matches!(
+                stat.rsplit_once(')')
+                    .and_then(|(_, rest)| rest.trim_start().chars().next()),
+                Some('Z' | 'X')
+            )
+        })
+    }
+
+    async fn assert_killed(pid: i32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while running(pid) {
+            if std::time::Instant::now() >= deadline {
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .status();
+                panic!("a process claude started outlived the run");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn stream(child: Child, timeout: Duration, stop_after: Option<Duration>) -> Streamed {
+        let queue = EventQueue::start(fake_api::sender(&fake_api::dead_api_url()));
+        let mut totals = TokenTotals::default();
+        let mut session_id = None;
+        stream_child(
+            child,
+            &queue,
+            &mut totals,
+            &mut session_id,
+            timeout,
+            async move {
+                match stop_after {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => std::future::pending().await,
+                }
+                Lost::RunOver
+            },
+        )
+        .await
+        .expect("streaming the stub")
+    }
+
+    #[tokio::test]
+    async fn a_lost_lease_kills_what_claude_started_too() {
+        let stub = Stub::new("exec sleep 300");
+        let child = stub.spawn();
+        let grandchild = stub.grandchild().await;
+
+        let streamed = stream(
+            child,
+            Duration::from_secs(60),
+            Some(Duration::from_millis(50)),
+        )
+        .await;
+
+        assert!(matches!(streamed, Streamed::Stopped(Lost::RunOver)));
+        assert_killed(grandchild).await;
+    }
+
+    #[tokio::test]
+    async fn a_child_that_never_exits_is_killed_at_the_timeout_with_what_it_started() {
+        let stub = Stub::new("exec sleep 300");
+        let child = stub.spawn();
+        let grandchild = stub.grandchild().await;
+
+        let started = std::time::Instant::now();
+        let streamed = stream(child, Duration::from_millis(300), None).await;
+
+        assert!(matches!(streamed, Streamed::Exited(-1)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_killed(grandchild).await;
+    }
+
+    #[tokio::test]
+    async fn a_finished_run_leaves_no_background_process_behind() {
+        let stub = Stub::new("exit 0");
+        let child = stub.spawn();
+        let grandchild = stub.grandchild().await;
+
+        let streamed = stream(child, Duration::from_secs(60), None).await;
+
+        assert!(matches!(streamed, Streamed::Exited(0)));
+        assert_killed(grandchild).await;
+    }
 
     #[tokio::test]
     async fn a_lost_lease_kills_claude_instead_of_waiting_for_it() {

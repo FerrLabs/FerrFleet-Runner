@@ -280,7 +280,11 @@ What happens to each run:
    cancelled or superseded, or a `409` on any route because this runner lost the
    lease), the runner kills `claude`, reports nothing more for that run, and goes
    back to polling.
-5. Each run gets its own directory under `FERRFLEET_WORKING_DIR`, removed when
+5. `claude` runs in its own process group. When the run ends, whether `claude`
+   exited, hit the run's timeout or was taken back, the whole group is killed, so
+   nothing the agent started (a `cargo kani`, a `cbmc`, a background shell) keeps
+   running into the next run.
+6. Each run gets its own directory under `FERRFLEET_WORKING_DIR`, removed when
    the run is over, so the next run never clones into a used checkout.
 
 One process executes one run at a time. To run several at once, start several
