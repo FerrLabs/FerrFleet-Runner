@@ -280,7 +280,11 @@ What happens to each run:
    cancelled or superseded, or a `409` on any route because this runner lost the
    lease), the runner kills `claude`, reports nothing more for that run, and goes
    back to polling.
-5. Each run gets its own directory under `FERRFLEET_WORKING_DIR`, removed when
+5. `claude` runs in its own process group. When the run ends, whether `claude`
+   exited, hit the run's timeout or was taken back, the whole group is killed, so
+   nothing the agent started (a `cargo kani`, a `cbmc`, a background shell) keeps
+   running into the next run.
+6. Each run gets its own directory under `FERRFLEET_WORKING_DIR`, removed when
    the run is over, so the next run never clones into a used checkout.
 
 One process executes one run at a time. To run several at once, start several
@@ -297,11 +301,16 @@ it, or the pool token was refused.
 ### Stopping a runner
 
 On `SIGTERM` or `SIGINT` the runner stops polling. A run in progress is left to
-finish, within the run's own timeout, and its heartbeats carry on until then.
+finish, within the run's own timeout, and its heartbeats carry on until then. `claude`
+runs in its own process group, so a Ctrl-C in the terminal does not reach it.
 Give the process a grace period that matches your agents' timeout. If it is
 killed before that, the heartbeats stop and FerrFleet settles the run itself
 after the lease lapses: a run not yet claimed goes back to the pool, a claimed
 one is marked failed rather than run twice.
+
+`ferrfleet-runner` without a subcommand executes a single run and does not wait
+for it: on `SIGTERM` or `SIGINT` it kills `claude` and everything it started, and
+exits `1`. FerrFleet settles the run after the lease lapses, as above.
 
 ## Formal verification image
 

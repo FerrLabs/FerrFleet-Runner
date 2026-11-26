@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use ferrfleet_shared::{ExecutorEvent, RunConfig, pricing};
 use time::OffsetDateTime;
+use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 
 mod agent;
@@ -70,7 +71,15 @@ async fn main() -> Result<()> {
     info!(run_id = %env.run_id, "starting runner");
 
     let sender = EventSender::new(env.clone());
-    supervise(&env, &sender).await?;
+    let mut term = signal(SignalKind::terminate()).context("listening for SIGTERM")?;
+    let mut int = signal(SignalKind::interrupt()).context("listening for SIGINT")?;
+    tokio::select! {
+        outcome = supervise(&env, &sender) => {
+            outcome?;
+        }
+        _ = term.recv() => bail!("SIGTERM received; the run was abandoned and everything claude started was killed"),
+        _ = int.recv() => bail!("SIGINT received; the run was abandoned and everything claude started was killed"),
+    }
     info!(run_id = %env.run_id, "runner exited cleanly");
     Ok(())
 }
