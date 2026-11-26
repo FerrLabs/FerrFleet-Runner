@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.13.3] - 2026-11-26
+
+### Bug Fixes
+
+- fix(runner): kill everything claude started when a run ends (#147)
+
 ## [1.13.2] - 2026-11-26
 
 ### Bug Fixes
