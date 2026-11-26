@@ -4,6 +4,13 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.13.2] - 2026-11-26
+
+### Bug Fixes
+
+- fix(deps): update url to 2.5.9 (RUSTSEC-2026-0592) (#148)
+- fix(runner): keep the prepared branch and surface a refused pull-request registration (#141)
+
 ## [1.13.1] - 2026-11-18
 
 ### Bug Fixes
