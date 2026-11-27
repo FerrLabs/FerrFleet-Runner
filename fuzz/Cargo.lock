@@ -86,6 +86,7 @@ dependencies = [
  "ferrfleet-shared",
  "libfuzzer-sys",
  "serde_json",
+ "time",
  "tokio",
  "tracing",
 ]
