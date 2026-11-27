@@ -280,10 +280,15 @@ What happens to each run:
    cancelled or superseded, or a `409` on any route because this runner lost the
    lease), the runner kills `claude`, reports nothing more for that run, and goes
    back to polling.
-5. `claude` runs in its own process group. When the run ends, whether `claude`
-   exited, hit the run's timeout or was taken back, the whole group is killed, so
-   nothing the agent started (a `cargo kani`, a `cbmc`, a background shell) keeps
-   running into the next run.
+5. `claude` runs in its own process group, and the runner marks itself a child
+   subreaper (`PR_SET_CHILD_SUBREAPER`) so that a process which loses its parent
+   is adopted by the runner instead of by init. When the run ends, whether `claude`
+   exited, hit the run's timeout or was taken back, the runner kills the group and
+   then every descendant of its own process by walking `/proc`, which also reaches
+   what left the group or the session (`setsid`, a double fork), and waits up to 5
+   seconds for them to be gone. The same sweep runs before a run starts. Nothing
+   the agent started (a `cargo kani`, a `cbmc`, a background shell) keeps running
+   into the next run. Linux only: elsewhere only the process group is killed.
 6. Each run gets its own directory under `FERRFLEET_WORKING_DIR`, removed when
    the run is over, so the next run never clones into a used checkout.
 
