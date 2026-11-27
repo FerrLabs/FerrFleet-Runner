@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.15.0] - 2026-11-27
+
+### Features
+
+- feat(runner): stream thinking and partial messages as deltas (#153)
+
 ## [1.14.2] - 2026-11-27
 
 ### Bug Fixes
