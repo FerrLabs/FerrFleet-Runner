@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.14.2] - 2026-11-27
+
+### Bug Fixes
+
+- fix(runner): kill every descendant of a stopped run, not only its process group (#156)
+
 ## [1.14.1] - 2026-11-27
 
 ### Bug Fixes
