@@ -11,7 +11,6 @@ repository = "https://github.com/FerrLabs/FerrFleet-Runner"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

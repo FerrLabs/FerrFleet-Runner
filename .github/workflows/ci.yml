@@ -45,10 +45,6 @@ jobs:
       - name: Action routing
         run: tests/action_routing.sh
 
-  kani:
-    name: Kani
-    uses: FerrLabs/.github/.github/workflows/reusable-kani.yml@3caec658e3b3d89f3d9c2d1e8ffe12798def4a43 # main
-
   deny:
     name: Cargo Security
     runs-on: ubuntu-latest
@@ -169,49 +165,6 @@ jobs:
       - name: mcp-grafana lists the datasources of a Grafana over stdio
         run: tests/mcp_grafana_smoke.sh ferrfleet-runner:ci
 
-  formal-image:
-    name: Formal image builds
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - name: The memory cap logic
-        run: tests/cbmc_limit.sh
-
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-
-      - name: Build the image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: .
-          target: formal
-          load: true
-          tags: ferrfleet-runner-formal:ci
-          cache-from: type=gha,scope=formal
-          cache-to: type=gha,scope=formal,mode=max
-
-      - name: The toolchain, Kani and FerrFlow run as the runner user
-        run: |
-          set -euo pipefail
-          for cmd in "cargo --version" "cc --version" "cargo kani --version" "ferrflow --version" "sccache --version"; do
-            docker run --rm --user runner --entrypoint sh ferrfleet-runner-formal:ci -c "${cmd}"
-          done
-
-      - name: Build, test and verify on a read-only root
-        run: tests/formal_smoke.sh ferrfleet-runner-formal:ci
-
-      - name: CBMC runs under the memory cap
-        run: |
-          set -euo pipefail
-          cbmc='/home/runner/.kani/kani-*/bin/cbmc'
-          docker run --rm --user runner --entrypoint sh ferrfleet-runner-formal:ci -c "${cbmc} --version"
-          if docker run --rm --user runner --env KANI_MEMORY_LIMIT=1M --entrypoint sh ferrfleet-runner-formal:ci -c "${cbmc} --version"; then
-            echo "cbmc ignored KANI_MEMORY_LIMIT" >&2
-            exit 1
-          fi
-
   action:
     name: Action manifest
     runs-on: ubuntu-latest
@@ -289,7 +242,7 @@ jobs:
 
   release:
     name: Release with FerrFlow
-    needs: [check, kani, deny, musl, image, formal-image, action, chart]
+    needs: [check, deny, musl, image, action, chart]
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     concurrency:
       group: release-${{ github.ref }}
