@@ -3,6 +3,7 @@ use crate::config::Env;
 use crate::event_queue::EventQueue;
 use crate::lease::Lost;
 use crate::private_file::PrivateFile;
+use crate::reaper::Reaper;
 use crate::repo_context::prompt_with_repo_context;
 use crate::{claude_version, mcp_config, mcp_preflight, usage, workspace};
 use anyhow::{Context, Result};
@@ -243,6 +244,8 @@ pub(crate) async fn spawn_and_stream(
     git_credentials: Option<&workspace::GitCredentials>,
     stop: impl Future<Output = Lost>,
 ) -> Result<Streamed> {
+    let reaper = Reaper::runner();
+    reaper.settle().await;
     claude_version::ensure_supported().await?;
     let ClaudeInvocation {
         command,
@@ -252,39 +255,55 @@ pub(crate) async fn spawn_and_stream(
     } = build_claude_command(cfg, env, git_credentials)?;
     let child = spawn_with_prompt(command, stdin_prompt)?;
     let timeout = Duration::from_secs(cfg.timeout_seconds);
-    stream_child(child, queue, totals, session_id, timeout, stop).await
+    stream_child(child, reaper, queue, totals, session_id, timeout, stop).await
 }
 
-struct ProcessGroup(Pid);
+struct RunCleanup {
+    group: Option<Pid>,
+    reaper: Reaper,
+}
 
-impl ProcessGroup {
-    fn led_by(child: &Child) -> Option<Self> {
-        child
+impl RunCleanup {
+    fn for_child(child: &Child, reaper: Reaper) -> Self {
+        let group = child
             .id()
             .and_then(|id| i32::try_from(id).ok())
-            .and_then(Pid::from_raw)
-            .map(Self)
+            .and_then(Pid::from_raw);
+        Self { group, reaper }
+    }
+
+    fn kill_all(&self) {
+        self.reaper.kill_descendants();
+        if let Some(group) = self.group {
+            let _ = kill_process_group(group, Signal::KILL);
+        }
+    }
+
+    async fn finish(&self) {
+        self.kill_all();
+        self.reaper.settle().await;
     }
 }
 
-impl Drop for ProcessGroup {
+impl Drop for RunCleanup {
     fn drop(&mut self) {
-        let _ = kill_process_group(self.0, Signal::KILL);
+        self.kill_all();
     }
 }
 
 async fn stream_child(
     mut child: Child,
+    reaper: Reaper,
     queue: &EventQueue,
     totals: &mut TokenTotals,
     session_id: &mut Option<String>,
     timeout: Duration,
     stop: impl Future<Output = Lost>,
 ) -> Result<Streamed> {
-    let group = ProcessGroup::led_by(&child);
+    let cleanup = RunCleanup::for_child(&child, reaper);
     let stdout = child.stdout.take().context("claude stdout missing")?;
     let stderr = child.stderr.take().context("claude stderr missing")?;
-    let mut reader = BufReader::new(stdout).lines();
+    let mut lines = BufReader::new(stdout).lines();
 
     let stderr_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
@@ -297,7 +316,7 @@ async fn stream_child(
 
     let mut usage = usage::UsageLedger::default();
     let streaming = tokio::time::timeout(timeout, async {
-        while let Some(line) = reader.next_line().await? {
+        while let Some(line) = lines.next_line().await? {
             if line.trim().is_empty() {
                 continue;
             }
@@ -344,8 +363,10 @@ async fn stream_child(
         result = streaming => result,
         lost = stop => {
             warn!(%lost, "run stopped by FerrFleet; killing claude");
+            cleanup.kill_all();
             let _ = child.kill().await;
             stderr_task.abort();
+            cleanup.finish().await;
             return Ok(Streamed::Stopped(lost));
         }
     };
@@ -358,18 +379,19 @@ async fn stream_child(
             .code()
             .unwrap_or(-1),
         Ok(Err(err)) => {
-            drop(group);
+            cleanup.finish().await;
             let _ = stderr_task.await;
             return Err(err);
         }
         Err(_) => {
             warn!("timeout exceeded; killing claude");
+            cleanup.kill_all();
             let _ = child.kill().await;
             -1
         }
     };
 
-    drop(group);
+    cleanup.finish().await;
     let _ = stderr_task.await;
     Ok(Streamed::Exited(exit_code))
 }
@@ -743,10 +765,14 @@ mod stop_tests {
 
     impl Stub {
         fn new(body: &str) -> Self {
+            Self::starting("sleep 300", body)
+        }
+
+        fn starting(background: &str, body: &str) -> Self {
             let grandchild_pid =
                 std::env::temp_dir().join(format!("ferrfleet-stub-{}.pid", uuid::Uuid::new_v4()));
             let script = format!(
-                "sleep 300 </dev/null >/dev/null 2>&1 &\necho $! > {}\n{body}\n",
+                "{background} </dev/null >/dev/null 2>&1 &\necho $! > {}\n{body}\n",
                 grandchild_pid.display()
             );
             Self {
@@ -813,12 +839,19 @@ mod stop_tests {
         }
     }
 
+    fn reaper_under(child: &Child) -> Reaper {
+        let pid = child.id().and_then(|id| i32::try_from(id).ok());
+        Reaper::under(Pid::from_raw(pid.expect("a running child has a pid")).expect("a pid"))
+    }
+
     async fn stream(child: Child, timeout: Duration, stop_after: Option<Duration>) -> Streamed {
+        let reaper = reaper_under(&child);
         let queue = EventQueue::start(fake_api::sender(&fake_api::dead_api_url()));
         let mut totals = TokenTotals::default();
         let mut session_id = None;
         stream_child(
             child,
+            reaper,
             &queue,
             &mut totals,
             &mut session_id,
@@ -850,6 +883,123 @@ mod stop_tests {
 
         assert!(matches!(streamed, Streamed::Stopped(Lost::RunOver)));
         assert_killed(grandchild).await;
+    }
+
+    #[tokio::test]
+    async fn a_stop_kills_a_child_that_left_the_process_group_and_the_session() {
+        let stub = Stub::starting("setsid sleep 300", "exec sleep 300");
+        let child = stub.spawn();
+        let grandchild = stub.grandchild().await;
+        let group = i32::try_from(child.id().expect("a running child has a pid")).expect("pid");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while rustix::process::getpgid(Pid::from_raw(grandchild))
+            .expect("the child is alive")
+            .as_raw_nonzero()
+            .get()
+            == group
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stub never detached"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let streamed = stream(
+            child,
+            Duration::from_secs(60),
+            Some(Duration::from_millis(50)),
+        )
+        .await;
+
+        assert!(matches!(streamed, Streamed::Stopped(Lost::RunOver)));
+        assert_killed(grandchild).await;
+    }
+
+    #[tokio::test]
+    async fn a_timeout_kills_a_child_that_left_the_process_group_and_the_session() {
+        let stub = Stub::starting("setsid sleep 300", "exec sleep 300");
+        let child = stub.spawn();
+        let grandchild = stub.grandchild().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let streamed = stream(child, Duration::from_millis(300), None).await;
+
+        assert!(matches!(streamed, Streamed::Exited(-1)));
+        assert_killed(grandchild).await;
+    }
+
+    const ORPHAN_SCENARIO: &str = "FERRFLEET_ORPHAN_SCENARIO";
+
+    #[tokio::test]
+    async fn a_stopped_run_leaves_no_orphan_behind_in_a_runner_process() {
+        let status = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args([
+                "--exact",
+                "claude::stop_tests::orphan_scenario",
+                "--test-threads=1",
+            ])
+            .env(ORPHAN_SCENARIO, "1")
+            .status()
+            .expect("re-running the test binary");
+        assert!(status.success(), "the orphan scenario failed");
+    }
+
+    #[tokio::test]
+    async fn orphan_scenario() {
+        if std::env::var_os(ORPHAN_SCENARIO).is_none() {
+            return;
+        }
+        let pidfile =
+            std::env::temp_dir().join(format!("ferrfleet-orphan-{}.pid", uuid::Uuid::new_v4()));
+        let script = format!(
+            "(setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! > {})\nexec sleep 300\n",
+            pidfile.display()
+        );
+        let reaper = Reaper::runner();
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = spawn_with_prompt(command, String::new()).expect("spawning the stub");
+        let orphan = loop {
+            if let Some(pid) = std::fs::read_to_string(&pidfile)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let _ = std::fs::remove_file(&pidfile);
+        let queue = EventQueue::start(fake_api::sender(&fake_api::dead_api_url()));
+        let mut totals = TokenTotals::default();
+        let mut session_id = None;
+
+        let streamed = stream_child(
+            child,
+            reaper,
+            &queue,
+            &mut totals,
+            &mut session_id,
+            Duration::from_secs(60),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Lost::RunOver
+            },
+        )
+        .await
+        .expect("a stop is not an error");
+
+        assert!(matches!(streamed, Streamed::Stopped(Lost::RunOver)));
+        assert!(
+            !std::path::Path::new(&format!("/proc/{orphan}")).exists(),
+            "an orphaned process of the run is still there, alive or as a zombie"
+        );
+        assert_eq!(reaper.settle().await, Vec::<i32>::new());
     }
 
     #[tokio::test]
@@ -910,8 +1060,10 @@ mod stop_tests {
         let mut session_id = None;
 
         let started = std::time::Instant::now();
+        let reaper = reaper_under(&child);
         let streamed = stream_child(
             child,
+            reaper,
             &queue,
             &mut totals,
             &mut session_id,

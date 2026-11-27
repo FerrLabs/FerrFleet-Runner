@@ -16,6 +16,7 @@ mod lease;
 mod mcp_config;
 mod mcp_preflight;
 mod private_file;
+mod reaper;
 mod repo_context;
 mod resources;
 mod retry;
