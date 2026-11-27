@@ -114,7 +114,11 @@ for bad in 0 -1 1.5 10m abc 604801 99999999999; do
   expect_reject "timeout '${bad}'" KANI_CBMC_TIMEOUT="${bad}"
 done
 
-alive() { kill -0 "$1" 2>/dev/null; }
+alive() {
+  local state
+  state=$(awk '{ sub(/^.*\) /, ""); print $1 }' "/proc/$1/stat" 2>/dev/null) || return 1
+  [ "${state}" != Z ] && [ "${state}" != X ]
+}
 
 rc=0
 started=$SECONDS
@@ -126,6 +130,14 @@ read -r cbmc_pid child_pid < "${work}/pids"
 sleep 0.2
 alive "${cbmc_pid}" && fail "runaway: cbmc still alive"
 alive "${child_pid}" && { fail "runaway: its child is still alive"; kill -KILL "${child_pid}"; }
+
+mkdir "${work}/old"
+printf '#!/bin/sh\nsleep 1\nexit 124\n' > "${work}/old/timeout"
+chmod +x "${work}/old/timeout"
+rc=0
+PATH="${work}/old:${PATH}" run KANI_CBMC_TIMEOUT=1 || rc=$?
+[ "${rc}" -eq 137 ] || fail "timeout reporting 124: exit ${rc}, want 137"
+grep -q 'killed after 1s' "${work}/err" || fail "timeout reporting 124: no message"
 
 rc=0
 started=$SECONDS

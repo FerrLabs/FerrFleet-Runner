@@ -102,7 +102,8 @@ fi
 started=$(date +%s)
 status=0
 timeout -s KILL "$timeout_seconds" prlimit --as="$limit" -- "$(dirname "$0")/cbmc.real" "$@" || status=$?
-if [ "$status" -eq 137 ] && [ $(($(date +%s) - started)) -ge "$timeout_seconds" ]; then
+if { [ "$status" -eq 137 ] || [ "$status" -eq 124 ]; } && [ $(($(date +%s) - started)) -ge "$timeout_seconds" ]; then
   echo "cbmc-limit: cbmc killed after ${timeout_seconds}s (KANI_CBMC_TIMEOUT)" >&2
+  status=137
 fi
 exit "$status"
