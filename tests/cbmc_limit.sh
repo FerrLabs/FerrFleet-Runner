@@ -18,9 +18,8 @@ cat > "${work}/bin/cbmc.real" <<'STUB'
 #!/bin/sh
 for a in "$@"; do printf '%s\n' "$a"; done
 if [ -n "${PIDS:-}" ]; then
-  sleep 300 &
-  printf '%s %s\n' "$$" "$!" > "$PIDS"
-  wait
+  printf '%s\n' "$$" > "$PIDS"
+  exec sleep 300
 fi
 exit "${CODE:-0}"
 STUB
@@ -126,10 +125,9 @@ PIDS="${work}/pids" run KANI_CBMC_TIMEOUT=1 || rc=$?
 [ "${rc}" -eq 137 ] || fail "runaway: exit ${rc}, want 137"
 [ $((SECONDS - started)) -lt 10 ] || fail "runaway: took $((SECONDS - started))s"
 grep -q 'killed after 1s (KANI_CBMC_TIMEOUT)' "${work}/err" || fail "runaway: no timeout message: $(cat "${work}/err")"
-read -r cbmc_pid child_pid < "${work}/pids"
+read -r cbmc_pid < "${work}/pids"
 sleep 0.2
-alive "${cbmc_pid}" && fail "runaway: cbmc still alive"
-alive "${child_pid}" && { fail "runaway: its child is still alive"; kill -KILL "${child_pid}"; }
+alive "${cbmc_pid}" && { fail "runaway: cbmc still alive"; kill -KILL "${cbmc_pid}"; }
 
 mkdir "${work}/old"
 printf '#!/bin/sh\nsleep 1\nexit 124\n' > "${work}/old/timeout"

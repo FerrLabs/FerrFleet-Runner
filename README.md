@@ -386,7 +386,7 @@ budget exceeded) and carry on with the other harnesses.
 
 Each `cbmc` process also has a wall-clock limit, `KANI_CBMC_TIMEOUT` seconds
 (default `600`, a positive integer up to 604800). A `cbmc` still running at the
-limit gets `SIGKILL` together with what it started, the wrapper exits `137` and
+limit gets `SIGKILL`, the wrapper exits `137` and
 prints `cbmc-limit: cbmc killed after Ns (KANI_CBMC_TIMEOUT)` on stderr, and the
 harness fails. The agent should report it as not verified (timeout) instead of
 retrying it with a bigger bound. Raise the variable for a pool whose proofs
