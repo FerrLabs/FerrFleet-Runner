@@ -350,7 +350,7 @@ memory cap. The cargo binaries (`cargo-kani`, `kani`) stay on `PATH` from
 `/home/runner/.cargo/bin`. `tests/formal_smoke.sh` runs `cargo build`,
 `cargo test` and `cargo kani` this way in CI, with `HOME=/tmp`.
 
-### Memory cap
+### Memory cap and time limit
 
 Every `cbmc` process (what `kani` and `cargo kani` spawn to check a harness) runs
 under `prlimit --as`, so a harness that is too large fails on its own instead of
@@ -372,16 +372,29 @@ above that (8GiB in a 12Gi pod). The rest of the pod (the agent CLI, `cargo` and
 harness got the whole pod OOMKilled before `cbmc` hit its own cap. With no limit at
 all it is 6GiB.
 
-The cap applies to each `cbmc` process, not to the pod. Kani checks harnesses one
-at a time by default; with `--jobs N`, N processes can each reach the cap, so set
-`KANI_MEMORY_LIMIT` to the per-job budget.
+The derived cap is divided by `KANI_JOBS` (default `1`, a positive integer up to
+1024), so that `cargo kani -j N` with `KANI_JOBS=N` keeps the N `cbmc` processes
+together inside the same budget: 4GiB each in a 12Gi pod with `KANI_JOBS=2`. An
+explicit `KANI_MEMORY_LIMIT` is applied to each process as given and is not
+divided, so set it to the per-job budget. A `KANI_JOBS` that is not a positive
+integer is rejected like an invalid `KANI_MEMORY_LIMIT`.
 
 A harness over the cap fails that `cargo kani` invocation with a non-zero exit
 (allocation failure or signal; at very small caps `cbmc` can die with SIGSEGV
 instead of a clean error). The agent should report it as not verified (memory
 budget exceeded) and carry on with the other harnesses.
 
-`tests/cbmc_limit.sh` checks the cap derivation and the override parsing.
+Each `cbmc` process also has a wall-clock limit, `KANI_CBMC_TIMEOUT` seconds
+(default `600`, a positive integer up to 604800). A `cbmc` still running at the
+limit gets `SIGKILL` together with what it started, the wrapper exits `137` and
+prints `cbmc-limit: cbmc killed after Ns (KANI_CBMC_TIMEOUT)` on stderr, and the
+harness fails. The agent should report it as not verified (timeout) instead of
+retrying it with a bigger bound. Raise the variable for a pool whose proofs
+legitimately run longer. An invalid value is rejected like an invalid
+`KANI_MEMORY_LIMIT`.
+
+`tests/cbmc_limit.sh` checks the cap derivation, the job split, the override
+parsing and the time limit.
 
 ## Run a pool on Kubernetes
 

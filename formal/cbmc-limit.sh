@@ -4,6 +4,8 @@ set -eu
 gib=$((1024 * 1024 * 1024))
 ceiling=$((1024 * gib))
 fallback=$((6 * gib))
+default_timeout=600
+max_jobs=1024
 
 die() {
   echo "cbmc-limit: $*" >&2
@@ -45,6 +47,20 @@ to_bytes() {
   echo $((digits * mult))
 }
 
+positive_int() {
+  name=$1
+  value=$2
+  bound=$3
+  case "$value" in
+    ''|*[!0-9]*) die "invalid $name '$value'" ;;
+  esac
+  value=$(strip_zeros "$value")
+  [ "${#value}" -le 9 ] || die "$name '$value' is above $bound"
+  [ "$value" -gt 0 ] || die "$name '$value' must be positive"
+  [ "$value" -le "$bound" ] || die "$name '$value' is above $bound"
+  echo "$value"
+}
+
 cgroup_limit() {
   for file in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
     [ -r "$file" ] || continue
@@ -65,13 +81,16 @@ cgroup_limit() {
 default_limit() {
   max=$(cgroup_limit)
   if [ -z "$max" ]; then
-    echo "$fallback"
+    echo $((fallback / jobs))
   elif [ "$max" -gt $((8 * gib)) ]; then
-    echo $((max - 4 * gib))
+    echo $(((max - 4 * gib) / jobs))
   else
-    echo $((max / 2))
+    echo $((max / 2 / jobs))
   fi
 }
+
+jobs=$(positive_int KANI_JOBS "${KANI_JOBS:-1}" "$max_jobs")
+timeout_seconds=$(positive_int KANI_CBMC_TIMEOUT "${KANI_CBMC_TIMEOUT:-$default_timeout}" 604800)
 
 if [ -n "${KANI_MEMORY_LIMIT:-}" ]; then
   limit=$(to_bytes "$KANI_MEMORY_LIMIT")
@@ -80,4 +99,10 @@ else
 fi
 [ "$limit" -gt 0 ] || die "computed memory limit is not positive"
 
-exec prlimit --as="$limit" -- "$(dirname "$0")/cbmc.real" "$@"
+started=$(date +%s)
+status=0
+timeout -s KILL "$timeout_seconds" prlimit --as="$limit" -- "$(dirname "$0")/cbmc.real" "$@" || status=$?
+if [ "$status" -eq 137 ] && [ $(($(date +%s) - started)) -ge "$timeout_seconds" ]; then
+  echo "cbmc-limit: cbmc killed after ${timeout_seconds}s (KANI_CBMC_TIMEOUT)" >&2
+fi
+exit "$status"

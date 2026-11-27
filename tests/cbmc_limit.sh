@@ -17,6 +17,11 @@ chmod +x "${work}/bin/cbmc"
 cat > "${work}/bin/cbmc.real" <<'STUB'
 #!/bin/sh
 for a in "$@"; do printf '%s\n' "$a"; done
+if [ -n "${PIDS:-}" ]; then
+  sleep 300 &
+  printf '%s %s\n' "$$" "$!" > "$PIDS"
+  wait
+fi
 exit "${CODE:-0}"
 STUB
 cat > "${work}/stub/prlimit" <<STUB
@@ -33,7 +38,7 @@ fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
 
 run() {
   rm -f "${work}/as"
-  env -u KANI_MEMORY_LIMIT PATH="${work}/stub:${PATH}" "$@" "${work}/bin/cbmc" x "y z" 2>"${work}/err" >"${work}/out" || return $?
+  env -u KANI_MEMORY_LIMIT -u KANI_JOBS -u KANI_CBMC_TIMEOUT PATH="${work}/stub:${PATH}" "$@" "${work}/bin/cbmc" x "y z" 2>"${work}/err" >"${work}/out" || return $?
 }
 
 setup() {
@@ -90,6 +95,50 @@ done
 for bad in 0 00 0G -1 -1G +1 1.5G 6GB 6B G Gi ki abc "6 G" 99999999999G 1025G 99999999999999999999 1GiB 1kK 1Gg 1GG 1G2G 6KiK 1Kik 1mM 654m1M; do
   expect_reject "override '${bad}'" KANI_MEMORY_LIMIT="${bad}"
 done
+
+setup "$((16 * gib))"
+expect_cap "jobs 1 is the default" "$((12 * gib))" KANI_JOBS=1
+expect_cap "2 jobs split the budget" "$((6 * gib))" KANI_JOBS=2
+expect_cap "3 jobs split the budget" "$((4 * gib))" KANI_JOBS=3
+expect_cap "leading zeros in jobs" "$((6 * gib))" KANI_JOBS=002
+setup "$((8 * gib))"
+expect_cap "2 jobs in an 8Gi pod" "$((2 * gib))" KANI_JOBS=2
+setup
+expect_cap "2 jobs without a cgroup limit" "$((3 * gib))" KANI_JOBS=2
+setup "$((16 * gib))"
+expect_cap "jobs do not divide an explicit limit" "$((6 * gib))" KANI_JOBS=4 KANI_MEMORY_LIMIT=6G
+for bad in 0 00 -1 +1 2.5 two "1 2" 1025 99999999999; do
+  expect_reject "jobs '${bad}'" KANI_JOBS="${bad}"
+done
+for bad in 0 -1 1.5 10m abc 604801 99999999999; do
+  expect_reject "timeout '${bad}'" KANI_CBMC_TIMEOUT="${bad}"
+done
+
+alive() { kill -0 "$1" 2>/dev/null; }
+
+rc=0
+started=$SECONDS
+PIDS="${work}/pids" run KANI_CBMC_TIMEOUT=1 || rc=$?
+[ "${rc}" -eq 137 ] || fail "runaway: exit ${rc}, want 137"
+[ $((SECONDS - started)) -lt 10 ] || fail "runaway: took $((SECONDS - started))s"
+grep -q 'killed after 1s (KANI_CBMC_TIMEOUT)' "${work}/err" || fail "runaway: no timeout message: $(cat "${work}/err")"
+read -r cbmc_pid child_pid < "${work}/pids"
+sleep 0.2
+alive "${cbmc_pid}" && fail "runaway: cbmc still alive"
+alive "${child_pid}" && { fail "runaway: its child is still alive"; kill -KILL "${child_pid}"; }
+
+rc=0
+started=$SECONDS
+CODE=0 run KANI_CBMC_TIMEOUT=30 || rc=$?
+[ "${rc}" -eq 0 ] || fail "fast run: exit ${rc}"
+[ $((SECONDS - started)) -lt 10 ] || fail "fast run: took $((SECONDS - started))s"
+[ ! -s "${work}/err" ] || fail "fast run: unexpected stderr: $(cat "${work}/err")"
+[ "$(cat "${work}/out")" = $'x\ny z' ] || fail "fast run: output changed"
+
+rc=0
+CODE=137 run KANI_CBMC_TIMEOUT=600 || rc=$?
+[ "${rc}" -eq 137 ] || fail "a 137 from cbmc itself: ${rc}"
+[ ! -s "${work}/err" ] || fail "a kill that is not the timeout was reported as one"
 
 rc=0
 CODE=37 run KANI_MEMORY_LIMIT=1G || rc=$?
