@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.14.1] - 2026-11-27
+
+### Bug Fixes
+
+- fix(fuzz): declare the time dependency so the targets build (#154)
+
 ## [1.14.0] - 2026-11-27
 
 ### Features
