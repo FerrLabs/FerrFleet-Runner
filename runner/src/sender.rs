@@ -34,6 +34,7 @@ pub struct EventSender {
 impl EventSender {
     pub const TIMEOUT: Duration = Duration::from_secs(10);
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+    const DELTA_TIMEOUT: Duration = Duration::from_secs(2);
 
     pub fn new(env: Env) -> Self {
         Self::configured(env, Backoff::API_REDEPLOY, Self::TIMEOUT)
@@ -201,6 +202,28 @@ impl EventSender {
         .await
         .and_then(|resp| resp.error_for_status().map_err(anyhow::Error::from))
         .with_context(|| format!("POST {url}"))?;
+        Ok(())
+    }
+
+    pub async fn send_delta(&self, event: &ExecutorEvent) -> Result<()> {
+        if let Some(lost) = self.lost() {
+            return Err(Stopped(lost).into());
+        }
+        let url = format!("{}/runs/{}/events", self.env.api_url, self.env.run_id);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.env.run_token)
+            .timeout(Self::DELTA_TIMEOUT)
+            .json(event)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        if let Some(lease) = &self.lease {
+            lease.observe(resp.status());
+        }
+        resp.error_for_status()
+            .with_context(|| format!("non-2xx from {url}"))?;
         Ok(())
     }
 }

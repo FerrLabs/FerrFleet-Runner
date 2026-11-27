@@ -124,6 +124,7 @@ fn build_claude_command(
         .arg("--output-format")
         .arg("stream-json")
         .arg("--verbose")
+        .arg("--include-partial-messages")
         .current_dir(&cfg.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -465,6 +466,20 @@ mod environment_note_tests {
             .filter(|(_, a)| *a == "--effort")
             .map(|(i, _)| args[i + 1].clone())
             .collect()
+    }
+
+    #[test]
+    fn the_cli_is_asked_for_partial_messages() {
+        let cfg = config(
+            "00000000-0000-0000-0000-000000000001",
+            "/workdir",
+            "abc",
+            None,
+        );
+        let invocation =
+            build_claude_command(&cfg, &env(&cfg.working_dir), None).expect("building");
+        let args: Vec<_> = invocation.command.as_std().get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("--include-partial-messages")));
     }
 
     #[test]

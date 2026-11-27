@@ -218,3 +218,75 @@ async fn a_heartbeat_without_resources_has_no_body() {
 
     assert_eq!(api.received()[0].body, "");
 }
+
+fn delta() -> ExecutorEvent {
+    ExecutorEvent::Delta {
+        kind: ferrfleet_shared::DeltaKind::Text,
+        content: "live".to_owned(),
+        timestamp: OffsetDateTime::now_utc(),
+    }
+}
+
+#[tokio::test]
+async fn a_delta_the_api_answers_with_a_503_is_sent_once() {
+    let api = FakeApi::start(|_| Reply::status(503)).await;
+
+    let outcome = sender(&api.url).send_delta(&delta()).await;
+
+    assert!(outcome.is_err());
+    assert_eq!(api.received().len(), 1, "a delta was retried");
+}
+
+#[tokio::test]
+async fn a_delta_to_an_api_that_does_not_know_the_variant_fails_without_a_retry() {
+    let api = FakeApi::start(|_| Reply::status(422)).await;
+
+    let outcome = sender(&api.url).send_delta(&delta()).await;
+
+    assert!(outcome.is_err());
+    assert_eq!(api.received().len(), 1);
+}
+
+#[tokio::test]
+async fn a_delta_to_a_dead_api_is_not_retried_until_it_listens() {
+    let started = Instant::now();
+
+    let outcome = sender(&dead_api_url()).send_delta(&delta()).await;
+
+    assert!(outcome.is_err());
+    assert!(started.elapsed() < FAST.first_delay * 3 + Duration::from_millis(200));
+}
+
+#[tokio::test]
+async fn a_delta_that_hangs_gives_up_before_a_normal_event_would() {
+    let api = FakeApi::start(|_| Reply::status(202).after(Duration::from_secs(5))).await;
+    let started = Instant::now();
+
+    let outcome = sender(&api.url).send_delta(&delta()).await;
+
+    assert!(outcome.is_err());
+    assert!(started.elapsed() < Duration::from_secs(4));
+}
+
+#[tokio::test]
+async fn a_410_on_a_delta_still_ends_the_lease() {
+    let api = FakeApi::start(|_| Reply::status(410)).await;
+    let lease = LeaseState::default();
+    let sender = sender(&api.url).with_lease(lease.clone());
+
+    assert!(sender.send_delta(&delta()).await.is_err());
+
+    assert_eq!(lease.lost(), Some(Lost::RunOver));
+}
+
+#[tokio::test]
+async fn a_delta_is_not_sent_once_the_lease_is_lost() {
+    let api = FakeApi::start(|_| Reply::status(202)).await;
+    let lease = LeaseState::default();
+    lease.observe(reqwest::StatusCode::CONFLICT);
+    let sender = sender(&api.url).with_lease(lease);
+
+    assert!(sender.send_delta(&delta()).await.is_err());
+
+    assert!(api.received().is_empty());
+}
