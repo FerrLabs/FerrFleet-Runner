@@ -295,7 +295,7 @@ What happens to each run:
    then every descendant of its own process by walking `/proc`, which also reaches
    what left the group or the session (`setsid`, a double fork), and waits up to 5
    seconds for them to be gone. The same sweep runs before a run starts. Nothing
-   the agent started (a `cargo kani`, a `cbmc`, a background shell) keeps running
+   the agent started (a build, a test run, a background shell) keeps running
    into the next run. Linux only: elsewhere only the process group is killed.
 6. Each run gets its own directory under `FERRFLEET_WORKING_DIR`, removed when
    the run is over, so the next run never clones into a used checkout.
@@ -325,76 +325,7 @@ one is marked failed rather than run twice.
 for it: on `SIGTERM` or `SIGINT` it kills `claude` and everything it started, and
 exits `1`. FerrFleet settles the run after the lease lapses, as above.
 
-## Formal verification image
-
-`ghcr.io/ferrlabs/ferrfleet/runner-formal` is the runner image plus what an agent
-needs to verify Rust code: `build-essential`, `pkg-config`, `libssl-dev`, a
-minimal stable Rust toolchain with `clippy` and `rustfmt`,
-[Kani](https://github.com/model-checking/kani) with its CBMC backend already
-set up, and the [FerrFlow](https://github.com/FerrLabs/FerrFlow) CLI so
-`ferrflow validate` can check a release config offline. It is published with
-the same tags, signature, provenance and SBOM as the main image, and the same
-entrypoint.
-
-An agent runs on it through a runner pool: deploy runners with this image, register
-them in a FerrFleet runner pool, and assign the agent to that pool. There is no
-per-agent image option; `options.runner_image` is ignored by FerrFleet.
-
-```bash
-docker build --target formal -t runner-formal .
-```
-
-A plain `docker build .` still produces the light image.
-
-### Read-only root filesystem
-
-The image works with a read-only root filesystem when `/tmp` and `/workdir` are
-writable. `CARGO_HOME` is `/tmp/cargo` (registry and git caches), empty at
-start, so the first build of a crate with dependencies downloads them. Build
-output stays in the crate's own `target/` under `/workdir`. FerrFleet's managed
-Jobs size `/workdir` at 10Gi and `/tmp` at 4Gi for checkout runs; the chart's
-default `tmpSizeLimit` (512Mi) is too small for a registry cache, so raise it for
-a pool that runs this image. The Rust toolchain, Kani's pinned nightly and Kani's
-bundle are installed at build time under `/home/runner` (`RUSTUP_HOME`,
-`KANI_HOME=/home/runner/.kani`) and are never written to at run time. `KANI_HOME`
-is set explicitly because the runner sets `HOME=/tmp`, and Kani would otherwise
-look for its bundle under `/tmp/.kani`, download a fresh one and skip the `cbmc`
-memory cap. The cargo binaries (`cargo-kani`, `kani`) stay on `PATH` from
-`/home/runner/.cargo/bin`. `tests/formal_smoke.sh` runs `cargo build`,
-`cargo test` and `cargo kani` this way in CI, with `HOME=/tmp`.
-
-### Memory cap
-
-Every `cbmc` process (what `kani` and `cargo kani` spawn to check a harness) runs
-under `prlimit --as`, so a harness that is too large fails on its own instead of
-getting the whole pod OOMKilled. The `cbmc` in Kani's bundle directory is replaced
-by a wrapper that execs the original (`cbmc.real`), so it applies however Kani is
-invoked. `cargo` and `rustc` are not capped.
-
-The cap is `KANI_MEMORY_LIMIT`: digits with an optional `K`, `M` or `G` suffix, or
-the Kubernetes `Ki`, `Mi`, `Gi` (binary units, so `6G` and `6Gi` are the same).
-Zero, negative, decimal, other suffixes and anything above 1TiB are rejected: the
-wrapper prints a message on stderr and exits 2 without running `cbmc`.
-
-When it is unset, the cap is derived from the pod's memory limit, read from cgroup
-v2 (`/sys/fs/cgroup/memory.max`) or else cgroup v1
-(`/sys/fs/cgroup/memory/memory.limit_in_bytes`, ignored when at or above the node's
-`MemTotal`): half the limit up to 8GiB (4GiB in an 8Gi pod), the limit minus 4GiB
-above that (8GiB in a 12Gi pod). The rest of the pod (the agent CLI, `cargo` and
-`rustc`, the Vault Agent sidecar) needs that headroom: with a 2GiB margin a large
-harness got the whole pod OOMKilled before `cbmc` hit its own cap. With no limit at
-all it is 6GiB.
-
-The cap applies to each `cbmc` process, not to the pod. Kani checks harnesses one
-at a time by default; with `--jobs N`, N processes can each reach the cap, so set
-`KANI_MEMORY_LIMIT` to the per-job budget.
-
-A harness over the cap fails that `cargo kani` invocation with a non-zero exit
-(allocation failure or signal; at very small caps `cbmc` can die with SIGSEGV
-instead of a clean error). The agent should report it as not verified (memory
-budget exceeded) and carry on with the other harnesses.
-
-`tests/cbmc_limit.sh` checks the cap derivation and the override parsing.
+The formal verification image is maintained in the private ferrfleet-runner-images repository.
 
 ## Run a pool on Kubernetes
 

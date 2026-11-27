@@ -27,9 +27,6 @@ jobs:
           - variant: runtime
             image: ghcr.io/ferrlabs/ferrfleet/runner
             description: Executes one FerrFleet agent run.
-          - variant: formal
-            image: ghcr.io/ferrlabs/ferrfleet/runner-formal
-            description: Executes one FerrFleet agent run, with a Rust toolchain and Kani for formal verification.
     env:
       IMAGE: ${{ matrix.image }}
     permissions:
