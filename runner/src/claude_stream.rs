@@ -711,15 +711,15 @@ mod tests {
     fn tool_input_deltas_are_never_forwarded() {
         let lines = [
             r#"{"type":"stream_event","event":{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"t1","name":"Bash","input":{}}},"parent_tool_use_id":null}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"curl -H 'Authorization: Bearer sk-live-SECRET'"}},"parent_tool_use_id":null}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","text":"sk-live-SECRET","thinking":"sk-live-SECRET"}},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"echo tool-input-marker"}},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","text":"tool-input-marker","thinking":"tool-input-marker"}},"parent_tool_use_id":null}"#,
         ];
         for line in lines {
             let events = events_of(line);
             assert!(
                 !serde_json::to_string(&events)
                     .unwrap()
-                    .contains("sk-live-SECRET"),
+                    .contains("tool-input-marker"),
                 "{line}"
             );
             assert!(events.is_empty(), "{line}");
