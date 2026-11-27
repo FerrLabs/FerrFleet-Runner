@@ -146,6 +146,13 @@ pub fn default_model() -> &'static str {
     "sonnet"
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeltaKind {
+    Thinking,
+    Text,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutorEvent {
@@ -163,6 +170,17 @@ pub enum ExecutorEvent {
         timestamp: OffsetDateTime,
     },
     AssistantMessage {
+        content: String,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
+    },
+    Thinking {
+        content: String,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
+    },
+    Delta {
+        kind: DeltaKind,
         content: String,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
@@ -308,6 +326,79 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    fn at_noon() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_794_994_200).unwrap()
+    }
+
+    #[test]
+    fn thinking_event_wire_shape_and_round_trip() {
+        let evt = ExecutorEvent::Thinking {
+            content: "weighing options".into(),
+            timestamp: at_noon(),
+        };
+        let value = serde_json::to_value(&evt).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "thinking",
+                "content": "weighing options",
+                "timestamp": "2026-11-18T09:30:00Z",
+            })
+        );
+        let parsed: ExecutorEvent = serde_json::from_value(value).unwrap();
+        let ExecutorEvent::Thinking { content, timestamp } = parsed else {
+            panic!("wrong variant");
+        };
+        assert_eq!(content, "weighing options");
+        assert_eq!(timestamp, at_noon());
+    }
+
+    #[test]
+    fn delta_event_wire_shape_and_round_trip() {
+        for (kind, wire) in [(DeltaKind::Thinking, "thinking"), (DeltaKind::Text, "text")] {
+            let evt = ExecutorEvent::Delta {
+                kind,
+                content: "par".into(),
+                timestamp: at_noon(),
+            };
+            let value = serde_json::to_value(&evt).unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "type": "delta",
+                    "kind": wire,
+                    "content": "par",
+                    "timestamp": "2026-11-18T09:30:00Z",
+                })
+            );
+            let parsed: ExecutorEvent = serde_json::from_value(value).unwrap();
+            let ExecutorEvent::Delta {
+                kind: parsed_kind,
+                content,
+                timestamp,
+            } = parsed
+            else {
+                panic!("wrong variant");
+            };
+            assert_eq!(parsed_kind, kind);
+            assert_eq!(content, "par");
+            assert_eq!(timestamp, at_noon());
+        }
+    }
+
+    #[test]
+    fn delta_with_unknown_kind_is_rejected() {
+        let json = r#"{"type":"delta","kind":"tool_use","content":"x","timestamp":"2026-11-18T09:30:00Z"}"#;
+        assert!(serde_json::from_str::<ExecutorEvent>(json).is_err());
+    }
+
+    #[test]
+    fn unknown_event_type_is_rejected() {
+        let json = r#"{"type":"reasoning","content":"x","timestamp":"2026-11-18T09:30:00Z"}"#;
+        let err = serde_json::from_str::<ExecutorEvent>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown variant `reasoning`"));
     }
 
     #[test]
