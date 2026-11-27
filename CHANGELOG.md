@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.14.0] - 2026-11-27
+
+### Features
+
+- feat(events): add Thinking and Delta run events (#152)
+
 ## [1.13.3] - 2026-11-26
 
 ### Bug Fixes
