@@ -1,14 +1,80 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use ferrfleet_shared::ExecutorEvent;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::{MissedTickBehavior, interval_at};
 use tracing::{info, warn};
 
+use crate::delta_buffer::DeltaBuffer;
 use crate::sender::EventSender;
 
+const DELTA_INTERVAL: Duration = Duration::from_millis(150);
+const MAX_PENDING_DELTAS: usize = 4;
+
+enum Item {
+    Event(ExecutorEvent),
+    Delta(ExecutorEvent),
+}
+
+#[derive(Clone)]
+struct DeltaLane {
+    tx: mpsc::UnboundedSender<Item>,
+    buffer: Arc<Mutex<DeltaBuffer>>,
+    pending: Arc<AtomicUsize>,
+}
+
+impl DeltaLane {
+    fn buffer(&self) -> MutexGuard<'_, DeltaBuffer> {
+        self.buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn release(&self, buffer: &mut DeltaBuffer) {
+        for delta in buffer.drain() {
+            if self.pending.load(Ordering::Acquire) >= MAX_PENDING_DELTAS {
+                continue;
+            }
+            self.pending.fetch_add(1, Ordering::AcqRel);
+            if self.tx.send(Item::Delta(delta)).is_err() {
+                self.pending.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
+
+    fn push(&self, event: ExecutorEvent) {
+        let mut buffer = self.buffer();
+        if let ExecutorEvent::Delta {
+            kind,
+            content,
+            timestamp,
+        } = &event
+        {
+            buffer.append(*kind, content, *timestamp);
+            return;
+        }
+        self.release(&mut buffer);
+        if self.tx.send(Item::Event(event)).is_err() {
+            warn!("event queue is no longer drained; event dropped");
+        }
+    }
+
+    async fn release_every_interval(self) {
+        let mut ticks = interval_at(tokio::time::Instant::now() + DELTA_INTERVAL, DELTA_INTERVAL);
+        ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            ticks.tick().await;
+            self.release(&mut self.buffer());
+        }
+    }
+}
+
 pub struct EventQueue {
-    tx: mpsc::UnboundedSender<ExecutorEvent>,
+    lane: DeltaLane,
+    releaser: JoinHandle<()>,
     drain: JoinHandle<()>,
     flush_budget: Duration,
 }
@@ -16,41 +82,62 @@ pub struct EventQueue {
 impl EventQueue {
     pub fn start(sender: EventSender) -> Self {
         let flush_budget = sender.retry_budget();
-        let (tx, mut rx) = mpsc::unbounded_channel::<ExecutorEvent>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Item>();
+        let lane = DeltaLane {
+            tx,
+            buffer: Arc::default(),
+            pending: Arc::default(),
+        };
+        let pending = lane.pending.clone();
         let drain = tokio::spawn(async move {
-            while let Some(event) = rx.recv().await {
+            while let Some(item) = rx.recv().await {
+                if matches!(item, Item::Delta(_)) {
+                    pending.fetch_sub(1, Ordering::AcqRel);
+                }
                 if sender.lost().is_some() {
                     continue;
                 }
-                if let Err(err) = sender.send(&event).await {
-                    if let Some(lost) = sender.lost() {
-                        info!(%lost, "run stopped; queued events are dropped");
-                    } else {
-                        warn!(?err, "failed to push event to api (continuing)");
+                match item {
+                    Item::Event(event) => {
+                        if let Err(err) = sender.send(&event).await {
+                            if let Some(lost) = sender.lost() {
+                                info!(%lost, "run stopped; queued events are dropped");
+                            } else {
+                                warn!(?err, "failed to push event to api (continuing)");
+                            }
+                        }
+                    }
+                    Item::Delta(delta) => {
+                        if let Err(err) = sender.send_delta(&delta).await {
+                            tracing::debug!(?err, "delta dropped");
+                        }
                     }
                 }
             }
         });
+        let releaser = tokio::spawn(lane.clone().release_every_interval());
         Self {
-            tx,
+            lane,
+            releaser,
             drain,
             flush_budget,
         }
     }
 
     pub fn push(&self, event: ExecutorEvent) {
-        if self.tx.send(event).is_err() {
-            warn!("event queue is no longer drained; event dropped");
-        }
+        self.lane.push(event);
     }
 
     pub async fn flush(self) {
         let Self {
-            tx,
+            lane,
+            releaser,
             mut drain,
             flush_budget,
         } = self;
-        drop(tx);
+        releaser.abort();
+        let _ = releaser.await;
+        drop(lane);
         match tokio::time::timeout(flush_budget, &mut drain).await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => warn!(?err, "event queue drain task failed"),
@@ -69,10 +156,13 @@ impl EventQueue {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use ferrfleet_shared::ExecutorEvent;
-    use time::OffsetDateTime;
+    use std::sync::Arc;
 
-    use super::EventQueue;
+    use ferrfleet_shared::{DeltaKind, ExecutorEvent};
+    use time::OffsetDateTime;
+    use tokio::sync::mpsc;
+
+    use super::{DELTA_INTERVAL, DeltaLane, EventQueue, Item, MAX_PENDING_DELTAS};
     use crate::fake_api::{FakeApi, RUN_ID, Received, Reply, dead_api_url, sender};
     use crate::retry::Backoff;
     use crate::sender::EventSender;
@@ -151,6 +241,190 @@ mod tests {
             started.elapsed() < backoff.budget + Duration::from_millis(500),
             "flush took {:?}, one budget per queued event instead of one in total",
             started.elapsed()
+        );
+    }
+
+    fn delta(kind: DeltaKind, content: &str) -> ExecutorEvent {
+        ExecutorEvent::Delta {
+            kind,
+            content: content.to_owned(),
+            timestamp: OffsetDateTime::now_utc(),
+        }
+    }
+
+    fn lane() -> (DeltaLane, mpsc::UnboundedReceiver<Item>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let lane = DeltaLane {
+            tx,
+            buffer: Arc::default(),
+            pending: Arc::default(),
+        };
+        (lane, rx)
+    }
+
+    fn shape(rx: &mut mpsc::UnboundedReceiver<Item>) -> Vec<String> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|item| match item {
+                Item::Delta(ExecutorEvent::Delta { kind, content, .. }) => {
+                    format!("delta:{kind:?}:{content}")
+                }
+                Item::Event(ExecutorEvent::AssistantMessage { content, .. }) => {
+                    format!("event:{content}")
+                }
+                _ => "other".to_owned(),
+            })
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deltas_inside_one_interval_leave_as_a_single_concatenated_delta() {
+        let (lane, mut rx) = lane();
+        tokio::spawn(lane.clone().release_every_interval());
+
+        for chunk in ["a", "b", "c", "d"] {
+            lane.push(delta(DeltaKind::Text, chunk));
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        assert!(shape(&mut rx).is_empty(), "released before the interval");
+
+        tokio::time::sleep(DELTA_INTERVAL).await;
+        assert_eq!(shape(&mut rx), ["delta:Text:abcd"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn thinking_and_text_deltas_never_mix() {
+        let (lane, mut rx) = lane();
+        tokio::spawn(lane.clone().release_every_interval());
+
+        lane.push(delta(DeltaKind::Thinking, "hm"));
+        lane.push(delta(DeltaKind::Text, "Hi"));
+        lane.push(delta(DeltaKind::Thinking, "mm"));
+        tokio::time::sleep(DELTA_INTERVAL + Duration::from_millis(1)).await;
+
+        assert_eq!(shape(&mut rx), ["delta:Thinking:hmmm", "delta:Text:Hi"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_delta_is_released_before_the_event_queued_after_it() {
+        let (lane, mut rx) = lane();
+        tokio::spawn(lane.clone().release_every_interval());
+
+        lane.push(delta(DeltaKind::Text, "par"));
+        lane.push(delta(DeltaKind::Text, "tial"));
+        lane.push(message(7));
+        tokio::time::sleep(DELTA_INTERVAL * 3).await;
+
+        assert_eq!(shape(&mut rx), ["delta:Text:partial", "event:7"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_delta_after_the_event_comes_after_it() {
+        let (lane, mut rx) = lane();
+        tokio::spawn(lane.clone().release_every_interval());
+
+        lane.push(message(1));
+        lane.push(delta(DeltaKind::Text, "next"));
+        tokio::time::sleep(DELTA_INTERVAL + Duration::from_millis(1)).await;
+
+        assert_eq!(shape(&mut rx), ["event:1", "delta:Text:next"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_drain_never_holds_more_than_the_bound() {
+        let (lane, mut rx) = lane();
+        tokio::spawn(lane.clone().release_every_interval());
+
+        for n in 0..50 {
+            lane.push(delta(DeltaKind::Text, &n.to_string()));
+            tokio::time::sleep(DELTA_INTERVAL + Duration::from_millis(1)).await;
+        }
+
+        let held = shape(&mut rx);
+        assert_eq!(held.len(), MAX_PENDING_DELTAS);
+        assert_eq!(
+            held,
+            [
+                "delta:Text:0",
+                "delta:Text:1",
+                "delta:Text:2",
+                "delta:Text:3"
+            ],
+            "the oldest deltas are the ones kept"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_bound_does_not_apply_to_events() {
+        let (lane, mut rx) = lane();
+        for n in 0..50 {
+            lane.push(message(n));
+        }
+        assert_eq!(shape(&mut rx).len(), 50);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_delta_is_dropped_once_and_the_run_goes_on() {
+        let api = FakeApi::routed(|request, _| {
+            if request.body.contains(r#""type":"delta""#) {
+                Reply::status(422)
+            } else {
+                Reply::status(202)
+            }
+        })
+        .await;
+        let queue = EventQueue::start(sender(&api.url));
+
+        queue.push(delta(DeltaKind::Text, "live"));
+        tokio::time::sleep(DELTA_INTERVAL * 2).await;
+        queue.push(message(1));
+        queue.push(message(2));
+        queue.flush().await;
+
+        let bodies: Vec<String> = api.received().into_iter().map(|r| r.body).collect();
+        assert_eq!(
+            bodies
+                .iter()
+                .filter(|b| b.contains(r#""type":"delta""#))
+                .count(),
+            1,
+            "a refused delta was retried: {bodies:?}"
+        );
+        assert_eq!(
+            bodies
+                .iter()
+                .filter(|b| b.contains("assistant_message"))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn the_api_receives_a_delta_before_the_event_it_belongs_to() {
+        let api = FakeApi::start(|_| Reply::status(202)).await;
+        let queue = EventQueue::start(sender(&api.url));
+
+        queue.push(delta(DeltaKind::Text, "full "));
+        queue.push(delta(DeltaKind::Text, "text"));
+        queue.push(message(9));
+        queue.flush().await;
+
+        let types: Vec<(String, String)> = api
+            .received()
+            .into_iter()
+            .map(|r| {
+                let body: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+                (
+                    body["type"].as_str().unwrap().to_owned(),
+                    body["content"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            types,
+            [
+                ("delta".to_owned(), "full text".to_owned()),
+                ("assistant_message".to_owned(), "9".to_owned())
+            ]
         );
     }
 }

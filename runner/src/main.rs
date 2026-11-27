@@ -9,6 +9,7 @@ mod claude;
 mod claude_stream;
 mod claude_version;
 mod config;
+mod delta_buffer;
 mod event_queue;
 #[cfg(test)]
 mod fake_api;

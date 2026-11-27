@@ -34,6 +34,9 @@ fuzz_target!(|data: &str| {
             continue;
         };
         for event in &events {
+            if let ExecutorEvent::Delta { content, .. } = event {
+                assert!(!content.is_empty(), "empty delta forwarded");
+            }
             if let ExecutorEvent::ToolResult { output, .. } = event {
                 assert!(
                     images_are_elided(output),

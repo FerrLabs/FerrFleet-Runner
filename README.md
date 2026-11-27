@@ -28,6 +28,14 @@ Given a run id and a token, it asks the API for the run's configuration, clones
 the repository if the run has one, starts the `claude` CLI with the composed
 prompt, streams the events back as they happen, and reports the result.
 
+Besides the persisted events (messages, thinking, tool calls, usage), the runner
+starts `claude` with `--include-partial-messages` and forwards the model's
+partial text and thinking as `delta` events. Deltas are coalesced to at most one
+request per kind every 150 ms, flushed before the complete message they belong
+to, sent once with a 2 s timeout and dropped on any failure (an API that does
+not know them answers `422`). At most 4 are queued behind a slow API, the rest
+are dropped. They never retry and never fail the run.
+
 The prompt is split so it caches across runs. When the configuration carries a
 `stable_prefix` that `prompt` starts with, that prefix (the agent's own
 instructions, the same on every run of the agent) goes into the system prompt

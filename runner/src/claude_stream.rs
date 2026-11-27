@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use ferrfleet_shared::ExecutorEvent;
+use ferrfleet_shared::{DeltaKind, ExecutorEvent};
 use serde_json::Value;
 use time::OffsetDateTime;
 
@@ -84,10 +84,36 @@ pub fn translate(line: &str, usage: &mut UsageLedger) -> Result<Vec<ExecutorEven
                 });
             }
         }
+        "stream_event" => out.extend(delta_event(&value, now)),
         _ => {}
     }
 
     Ok(out)
+}
+
+fn delta_event(value: &Value, now: OffsetDateTime) -> Option<ExecutorEvent> {
+    if !value.get("parent_tool_use_id").is_none_or(Value::is_null) {
+        return None;
+    }
+    let event = value.get("event")?;
+    if event.get("type").and_then(Value::as_str) != Some("content_block_delta") {
+        return None;
+    }
+    let delta = event.get("delta")?;
+    let (kind, field) = match delta.get("type").and_then(Value::as_str)? {
+        "text_delta" => (DeltaKind::Text, "text"),
+        "thinking_delta" => (DeltaKind::Thinking, "thinking"),
+        _ => return None,
+    };
+    let content = delta
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|content| !content.is_empty())?;
+    Some(ExecutorEvent::Delta {
+        kind,
+        content: content.to_string(),
+        timestamp: now,
+    })
 }
 
 fn push_assistant_content(content: &Value, now: OffsetDateTime, out: &mut Vec<ExecutorEvent>) {
@@ -98,6 +124,18 @@ fn push_assistant_content(content: &Value, now: OffsetDateTime, out: &mut Vec<Ex
                 "text" => {
                     if let Some(text) = item.get("text").and_then(Value::as_str) {
                         out.push(ExecutorEvent::AssistantMessage {
+                            content: text.to_string(),
+                            timestamp: now,
+                        });
+                    }
+                }
+                "thinking" => {
+                    if let Some(text) = item
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                    {
+                        out.push(ExecutorEvent::Thinking {
                             content: text.to_string(),
                             timestamp: now,
                         });
@@ -616,5 +654,124 @@ mod tests {
         }
 
         assert_eq!(total, (160, 350, 6100));
+    }
+
+    fn events_of(line: &str) -> Vec<ExecutorEvent> {
+        translate(line, &mut UsageLedger::default()).unwrap()
+    }
+
+    fn delta(kind: &str, field: &str, content: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":1,"delta":{{"type":"{kind}","{field}":"{content}"}}}},"session_id":"s1","parent_tool_use_id":null,"uuid":"u1"}}"#
+        )
+    }
+
+    #[test]
+    fn a_text_delta_becomes_a_text_delta_event() {
+        let events = events_of(&delta("text_delta", "text", "Draw one"));
+        assert!(matches!(
+            events.as_slice(),
+            [ExecutorEvent::Delta { kind: DeltaKind::Text, content, .. }] if content == "Draw one"
+        ));
+    }
+
+    #[test]
+    fn a_thinking_delta_becomes_a_thinking_delta_event() {
+        let events = events_of(&delta("thinking_delta", "thinking", "weighing"));
+        assert!(matches!(
+            events.as_slice(),
+            [ExecutorEvent::Delta { kind: DeltaKind::Thinking, content, .. }] if content == "weighing"
+        ));
+    }
+
+    #[test]
+    fn empty_deltas_are_not_forwarded() {
+        assert!(events_of(&delta("thinking_delta", "thinking", "")).is_empty());
+        assert!(events_of(&delta("text_delta", "text", "")).is_empty());
+    }
+
+    #[test]
+    fn stream_events_that_carry_no_content_map_to_nothing() {
+        let lines = [
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m"}},"parent_tool_use_id":null,"thinking_display":"updates"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":"SIG"}},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"SIG"}},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"}},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"message_stop"},"parent_tool_use_id":null}"#,
+            r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":50}"#,
+        ];
+        for line in lines {
+            assert!(events_of(line).is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn tool_input_deltas_are_never_forwarded() {
+        let lines = [
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"t1","name":"Bash","input":{}}},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"curl -H 'Authorization: Bearer sk-live-SECRET'"}},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","text":"sk-live-SECRET","thinking":"sk-live-SECRET"}},"parent_tool_use_id":null}"#,
+        ];
+        for line in lines {
+            let events = events_of(line);
+            assert!(
+                !serde_json::to_string(&events)
+                    .unwrap()
+                    .contains("sk-live-SECRET"),
+                "{line}"
+            );
+            assert!(events.is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn subagent_deltas_are_not_forwarded_as_the_main_stream() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"inner"}},"parent_tool_use_id":"toolu_parent"}"#;
+        assert!(events_of(line).is_empty());
+    }
+
+    #[test]
+    fn a_complete_thinking_block_becomes_a_thinking_event() {
+        let line = r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":"weighing options","signature":"SIG"}],"usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        let events = events_of(line);
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ExecutorEvent::Thinking { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, ["weighing options"]);
+        assert!(!serde_json::to_string(&events).unwrap().contains("SIG"));
+    }
+
+    #[test]
+    fn an_empty_or_redacted_thinking_block_emits_no_thinking_event() {
+        for block in [
+            r#"{"type":"thinking","thinking":"","signature":"SIG"}"#,
+            r#"{"type":"thinking","signature":"SIG"}"#,
+            r#"{"type":"redacted_thinking","data":"opaque"}"#,
+        ] {
+            let line = format!(
+                r#"{{"type":"assistant","message":{{"id":"m1","content":[{block}],"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+            );
+            assert!(
+                events_of(&line)
+                    .iter()
+                    .all(|e| !matches!(e, ExecutorEvent::Thinking { .. })),
+                "{block}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_repeated_assistant_text_still_yields_the_whole_message() {
+        let line = r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Draw one fruit."}],"usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        assert!(events_of(line).iter().any(|e| matches!(
+            e,
+            ExecutorEvent::AssistantMessage { content, .. } if content == "Draw one fruit."
+        )));
     }
 }
