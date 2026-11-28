@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.16.0] - 2026-11-28
+
+### Features
+
+- feat(runner): redact exact secret values in every event and log (#159)
+
 ## [1.15.1] - 2026-11-28
 
 ### Bug Fixes
