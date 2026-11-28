@@ -109,13 +109,13 @@ impl EventQueue {
                             if let Some(lost) = sender.lost() {
                                 info!(%lost, "run stopped; queued events are dropped");
                             } else {
-                                warn!(?err, "failed to push event to api (continuing)");
+                                warn!(err = %format_args!("{err:#}"), "failed to push event to api (continuing)");
                             }
                         }
                     }
                     Item::Delta(delta) => {
                         if let Err(err) = sender.send_delta(&delta).await {
-                            tracing::debug!(?err, "delta dropped");
+                            tracing::debug!(err = %format_args!("{err:#}"), "delta dropped");
                         }
                     }
                 }

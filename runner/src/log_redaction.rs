@@ -42,7 +42,7 @@ impl<W: Write> Write for RedactingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let text = String::from_utf8_lossy(buf);
         self.inner
-            .write_all(self.redactor.exact(&text).as_bytes())?;
+            .write_all(self.redactor.log_line(&text).as_bytes())?;
         Ok(buf.len())
     }
 
@@ -61,7 +61,7 @@ mod tests {
 
     use super::RedactingMakeWriter;
     use crate::redactor::{Secret, SharedRedactor};
-    use crate::test_support::fake_value;
+    use crate::test_support::{Rng, fake_value};
 
     #[derive(Clone, Default)]
     struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -144,5 +144,73 @@ mod tests {
             tracing::info!(path = "/x/y", "Basic plan: Bearer of news");
         });
         assert!(out.contains("Basic plan: Bearer of news"), "{out}");
+    }
+
+    const ODD: &[&str] = &[
+        "\"", "\\", "\t", "\n", "\r", "\u{1}", "\u{7f}", "'", "é", "日本", "<", "/",
+    ];
+
+    fn odd_secret(rng: &mut Rng) -> String {
+        let mut value = String::new();
+        while value.chars().count() < 8 + rng.below(16) {
+            if rng.below(3) == 0 {
+                value.push_str(rng.pick(ODD));
+            } else {
+                value.push(rng.alnum());
+            }
+        }
+        value
+    }
+
+    fn strings(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+            serde_json::Value::Object(map) => map.iter().for_each(|(k, v)| {
+                out.push(k.clone());
+                strings(v, out);
+            }),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn every_redacted_log_line_stays_json_and_hides_odd_secrets_in_every_field_style() {
+        let mut rng = Rng(0x10_6405);
+        let (mut leaks, mut invalid, mut lines) = (0, 0, 0);
+        for _ in 0..1_000 {
+            let secret = odd_secret(&mut rng);
+            let Some(registered) = Secret::new("DB_PASSWORD", &secret) else {
+                continue;
+            };
+            let debug = format!("{secret:?}");
+            let debug = &debug[1..debug.len() - 1];
+            let redactor = SharedRedactor::default();
+            redactor.reset(vec![registered]);
+            let err = std::io::Error::other(format!("connect with {secret}"));
+            let out = logged(&redactor, || {
+                tracing::warn!(?err, "failed");
+                tracing::warn!(%err, "failed");
+                tracing::warn!(value = ?secret, "failed");
+                tracing::warn!("failed with {secret}");
+            });
+            for line in out.lines() {
+                lines += 1;
+                let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) else {
+                    invalid += 1;
+                    continue;
+                };
+                let mut decoded = Vec::new();
+                strings(&parsed, &mut decoded);
+                if decoded
+                    .iter()
+                    .any(|s| s.contains(&secret) || s.contains(debug))
+                {
+                    leaks += 1;
+                }
+            }
+        }
+        assert!(lines > 3_000, "{lines}");
+        assert_eq!((leaks, invalid), (0, 0), "of {lines} lines");
     }
 }

@@ -34,13 +34,26 @@ impl Secret {
         Some(Self(value.to_owned()))
     }
 
-    fn forms(&self) -> impl Iterator<Item = String> {
-        let escaped = serde_json::to_string(&self.0)
-            .ok()
-            .map(|quoted| quoted[1..quoted.len() - 1].to_owned())
-            .filter(|escaped| *escaped != self.0);
-        std::iter::once(self.0.clone()).chain(escaped)
+    fn forms(&self) -> Vec<String> {
+        let debug = unquoted(&format!("{:?}", self.0));
+        let mut forms = vec![
+            json_escaped(&self.0),
+            json_escaped(&debug),
+            debug,
+            self.0.clone(),
+        ];
+        forms.sort();
+        forms.dedup();
+        forms
     }
+}
+
+fn unquoted(quoted: &str) -> String {
+    quoted[1..quoted.len() - 1].to_owned()
+}
+
+fn json_escaped(text: &str) -> String {
+    serde_json::to_string(text).map_or_else(|_| text.to_owned(), |quoted| unquoted(&quoted))
 }
 
 impl fmt::Debug for Secret {
@@ -67,6 +80,38 @@ impl Redactor {
                 .expect("a few short literal secrets always fit in an automaton")
         });
         Self { secrets, matcher }
+    }
+
+    pub fn log_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+        if self.matcher.is_none() {
+            return Cow::Borrowed(line);
+        }
+        let body = line.trim_end_matches('\n');
+        let Ok(parsed) = serde_json::from_str::<Value>(body) else {
+            return self.exact(line);
+        };
+        let redacted = self.exact_json(parsed.clone());
+        if redacted == parsed {
+            return Cow::Borrowed(line);
+        }
+        let mut out = redacted.to_string();
+        out.push_str(&line[body.len()..]);
+        Cow::Owned(out)
+    }
+
+    fn exact_json(&self, value: Value) -> Value {
+        match value {
+            Value::String(text) => Value::String(self.exact(&text).into_owned()),
+            Value::Array(items) => {
+                Value::Array(items.into_iter().map(|v| self.exact_json(v)).collect())
+            }
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(key, v)| (self.exact(&key).into_owned(), self.exact_json(v)))
+                    .collect(),
+            ),
+            other => other,
+        }
     }
 
     pub fn exact<'a>(&self, text: &'a str) -> Cow<'a, str> {
