@@ -18,6 +18,7 @@ mod mcp_config;
 mod mcp_preflight;
 mod private_file;
 mod reaper;
+mod redact;
 mod repo_context;
 mod resources;
 mod retry;
@@ -103,7 +104,7 @@ async fn supervise(env: &Env, sender: &EventSender) -> Result<RunOutcome> {
         }
         (Ok(outcome), None) => Ok(outcome),
         (Err(err), None) => {
-            error!(error = %format!("{err:#}"), "runner failed");
+            error!(error = %redact::redact(&format!("{err:#}")), "runner failed");
             queue.push(ExecutorEvent::Error {
                 message: format!("{err:#}"),
                 provider_signal: false,

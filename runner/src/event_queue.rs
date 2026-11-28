@@ -9,6 +9,7 @@ use tokio::time::{MissedTickBehavior, interval_at};
 use tracing::{info, warn};
 
 use crate::delta_buffer::DeltaBuffer;
+use crate::redact::redact;
 use crate::sender::EventSender;
 
 const DELTA_INTERVAL: Duration = Duration::from_millis(150);
@@ -79,6 +80,21 @@ pub struct EventQueue {
     flush_budget: Duration,
 }
 
+fn redacted(event: ExecutorEvent) -> ExecutorEvent {
+    match event {
+        ExecutorEvent::Error {
+            message,
+            provider_signal,
+            timestamp,
+        } => ExecutorEvent::Error {
+            message: redact(&message),
+            provider_signal,
+            timestamp,
+        },
+        other => other,
+    }
+}
+
 impl EventQueue {
     pub fn start(sender: EventSender) -> Self {
         let flush_budget = sender.retry_budget();
@@ -125,7 +141,7 @@ impl EventQueue {
     }
 
     pub fn push(&self, event: ExecutorEvent) {
-        self.lane.push(event);
+        self.lane.push(redacted(event));
     }
 
     pub async fn flush(self) {
@@ -203,6 +219,32 @@ mod tests {
             .chain((0..20).map(|n| n.to_string()))
             .collect();
         assert_eq!(contents(&api.received()), expected);
+    }
+
+    #[tokio::test]
+    async fn an_error_event_reaches_the_api_without_credentials() {
+        let api = FakeApi::start(|_| Reply::status(202)).await;
+        let events = EventQueue::start(sender(&api.url));
+
+        events.push(ExecutorEvent::Error {
+            message: "git clone failed: https://ghs_abcDEF123@github.com/o/r".to_owned(),
+            provider_signal: false,
+            timestamp: OffsetDateTime::now_utc(),
+        });
+        events.flush().await;
+
+        let received = api.received();
+        assert_eq!(received.len(), 1);
+        assert!(
+            !received[0].body.contains("abcDEF123"),
+            "{}",
+            received[0].body
+        );
+        assert!(
+            received[0].body.contains("<redacted>@github.com"),
+            "{}",
+            received[0].body
+        );
     }
 
     #[tokio::test]
