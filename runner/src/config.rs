@@ -111,7 +111,7 @@ mod tests {
             runner_name: None,
         };
         let mut cmd = Command::new("true");
-        cmd.env(POOL_TOKEN_VAR, crate::test_support::fake_value("leaked"));
+        cmd.env(POOL_TOKEN_VAR, crate::test_support::fake_value(2));
 
         env.apply_to(&mut cmd);
 
@@ -141,8 +141,7 @@ mod tests {
 
     #[test]
     fn a_pool_token_never_shows_in_debug_output() {
-        let token =
-            PoolToken::parse(format!("ffrp_{}", crate::test_support::fake_value("pool"))).unwrap();
-        assert!(!format!("{token:?}").contains("pool-"));
+        let token = PoolToken::parse(crate::test_support::fake_token("ffrp", 3)).unwrap();
+        assert!(!format!("{token:?}").contains(&crate::test_support::fake_value(3)));
     }
 }

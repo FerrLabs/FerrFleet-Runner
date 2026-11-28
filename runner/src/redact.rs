@@ -151,10 +151,20 @@ mod tests {
             xs[self.below(xs.len())]
         }
 
-        fn secret(&mut self) -> String {
-            const A: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        fn alnum(&mut self) -> char {
+            let digit = u32::try_from(self.below(62)).unwrap();
+            match digit {
+                0..=9 => char::from_digit(digit, 10).unwrap(),
+                10..=35 => char::from_digit(digit, 36).unwrap(),
+                _ => char::from_digit(digit - 26, 36)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            }
+        }
+
+        fn sample(&mut self) -> String {
             let n = 8 + self.below(20);
-            (0..n).map(|_| char::from(A[self.below(A.len())])).collect()
+            (0..n).map(|_| self.alnum()).collect()
         }
     }
 
@@ -193,12 +203,12 @@ mod tests {
     fn url_password_never_survives() {
         let mut rng = Rng(42);
         for _ in 0..5_000 {
-            let pw = rng.secret();
-            let url = format!("https://x-access-token:{pw}@github.com/o/r.git");
+            let credential = rng.sample();
+            let url = format!("https://x-access-token:{credential}@github.com/o/r.git");
             let wrap = rng.pick(&["'", "\"", "", "("]);
             let line = format!("{} {wrap}{url}{wrap} {}", rng.pick(NOISE), rng.pick(NOISE));
             let out = redact(&line);
-            assert!(!out.contains(&pw), "{line:?} -> {out:?}");
+            assert!(!out.contains(&credential), "{line:?} -> {out:?}");
         }
     }
 
@@ -207,10 +217,10 @@ mod tests {
         let mut rng = Rng(7);
         let mut leaks = Vec::new();
         for _ in 0..5_000 {
-            let tok = format!(
+            let sample = format!(
                 "{}_{}",
                 rng.pick(&["ghp", "ghs", "github_pat"]),
-                rng.secret()
+                rng.sample()
             );
             let shape = rng.pick(&[
                 "{t}",
@@ -220,9 +230,9 @@ mod tests {
                 "token={t}",
                 "Bearer\t{t}",
             ]);
-            let line = format!("fatal: {}", shape.replace("{t}", &tok));
+            let line = format!("fatal: {}", shape.replace("{t}", &sample));
             let out = redact(&line);
-            if out.contains(&tok) {
+            if out.contains(&sample) {
                 leaks.push((line, out));
             }
         }
@@ -236,32 +246,32 @@ mod tests {
 
     #[test]
     fn a_token_behind_an_alphanumeric_prefix_is_redacted() {
-        let tok = fake_token("ghs", "abcDEF123");
-        let out = redact(&format!("token={tok}"));
-        assert!(!out.contains(&tok), "{out}");
+        let sample = fake_token("ghs", 1);
+        let out = redact(&format!("token={sample}"));
+        assert!(!out.contains(&sample), "{out}");
     }
 
     #[test]
     fn a_token_used_as_the_url_username_is_redacted() {
-        let tok = fake_token("ghs", "abcDEF123");
-        let out = redact(&format!("https://{tok}@github.com/o/r"));
-        assert!(!out.contains(&tok), "{out}");
+        let sample = fake_token("ghs", 1);
+        let out = redact(&format!("https://{sample}@github.com/o/r"));
+        assert!(!out.contains(&sample), "{out}");
         assert!(out.ends_with("@github.com/o/r"), "{out}");
     }
 
     #[test]
     fn a_token_after_a_tab_is_redacted() {
-        let tok = fake_token("ghs", "abcDEF123");
-        let out = redact(&format!("Bearer\t{tok}"));
-        assert!(!out.contains(&tok), "{out}");
+        let sample = fake_token("ghs", 1);
+        let out = redact(&format!("Bearer\t{sample}"));
+        assert!(!out.contains(&sample), "{out}");
     }
 
     #[test]
     fn the_known_username_survives_and_its_password_does_not() {
-        let pw = fake_value("one");
+        let credential = fake_value(10);
         assert_eq!(
             redact(&format!(
-                "fatal: unable to access 'https://x-access-token:{pw}@github.com/o/r.git/': 403"
+                "fatal: unable to access 'https://x-access-token:{credential}@github.com/o/r.git/': 403"
             )),
             "fatal: unable to access 'https://x-access-token:<redacted>@github.com/o/r.git/': 403"
         );
@@ -273,13 +283,13 @@ mod tests {
 
     #[test]
     fn any_other_userinfo_is_redacted_whole() {
-        let pw = fake_value("two");
+        let credential = fake_value(11);
         assert_eq!(
-            redact(&format!("https://alice:{pw}@host/p")),
+            redact(&format!("https://alice:{credential}@host/p")),
             "https://<redacted>@host/p"
         );
         assert_eq!(
-            redact(&format!("https://{pw}@host/p")),
+            redact(&format!("https://{credential}@host/p")),
             "https://<redacted>@host/p"
         );
     }
@@ -296,14 +306,14 @@ mod tests {
     #[test]
     fn only_the_token_run_is_replaced() {
         assert_eq!(
-            redact(&format!("({}) done", fake_token("ghs", "abc123"))),
+            redact(&format!("({}) done", fake_token("ghs", 6))),
             "(<redacted>) done"
         );
     }
 
     #[test]
     fn authorization_header_values_are_redacted_to_the_end_of_the_line() {
-        let value = fake_value("three");
+        let value = fake_value(12);
         for line in [
             format!("Authorization: Bearer {value}"),
             format!("authorization: basic {value}"),
@@ -322,7 +332,7 @@ mod tests {
 
     #[test]
     fn bearer_and_basic_credentials_are_redacted() {
-        let value = fake_value("four");
+        let value = fake_value(13);
         assert_eq!(
             redact(&format!("sent Bearer {value} ok")),
             "sent Bearer <redacted> ok"
@@ -343,8 +353,8 @@ mod tests {
     fn redaction_is_idempotent() {
         let once = redact(&format!(
             "Bearer {} https://u:p@h/x token={}",
-            fake_token("ghs", "abc"),
-            fake_token("ghp", "zzz")
+            fake_token("ghs", 7),
+            fake_token("ghp", 8)
         ));
         assert_eq!(redact(&once), once);
     }

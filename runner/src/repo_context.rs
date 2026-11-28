@@ -149,7 +149,7 @@ mod repo_context_tests {
     use crate::test_support::fake_token;
 
     fn foreign_key() -> String {
-        fake_token("sk-ant", "not-yours")
+        fake_token("sk-ant", 4)
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {

@@ -17,7 +17,7 @@ use crate::lease::Lost;
 use crate::sender::EventSender;
 
 fn pool_token() -> String {
-    format!("ffrp_{}", crate::test_support::fake_value("pool"))
+    crate::test_support::fake_token("ffrp", 3)
 }
 const RUN_TOKEN: &str = "run-token-from-the-lease";
 const LEASE_PATH: &str = "/runner-pools/lease";

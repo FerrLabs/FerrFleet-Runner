@@ -493,10 +493,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failure_reports_redacted_and_capped_stderr() {
-        let tok = crate::test_support::fake_token("ghs", "abcDEF123");
+        let sample = crate::test_support::fake_token("ghs", 1);
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(format!(
-            "echo 'remote: https://{tok}@github.com/o/r' >&2; \
+            "echo 'remote: https://{sample}@github.com/o/r' >&2; \
              for i in $(seq 1 100); do echo \"line $i\" >&2; done; exit 3",
         ));
 
@@ -506,7 +506,7 @@ mod tests {
             .to_string();
 
         assert!(err.starts_with("git test failed with exit code 3"), "{err}");
-        assert!(!err.contains(&tok), "{err}");
+        assert!(!err.contains(&sample), "{err}");
         assert!(!err.contains("line 80\n"), "{err}");
         assert!(err.ends_with("line 100"), "{err}");
         assert_eq!(err.matches("line ").count(), 20, "{err}");
@@ -711,7 +711,7 @@ mod tests {
     }
 
     fn token() -> String {
-        fake_token("ghs", "abc")
+        fake_token("ghs", 5)
     }
 
     fn token_body() -> String {
