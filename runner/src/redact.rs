@@ -128,18 +128,9 @@ fn redact_tokens(text: &str) -> String {
 }
 
 #[cfg(test)]
-pub fn fake_token(kind: &str, body: &str) -> String {
-    format!("{kind}_{body}")
-}
-
-#[cfg(test)]
-pub fn fake_value(label: &str) -> String {
-    format!("{label}-{}", label.len() * 7919)
-}
-
-#[cfg(test)]
 mod tests {
-    use super::{fake_token, fake_value, redact, tail};
+    use super::{redact, tail};
+    use crate::test_support::{fake_token, fake_value};
 
     struct Rng(u64);
 

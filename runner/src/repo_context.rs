@@ -146,6 +146,11 @@ fn missing_context(prompt: &str, relative: &str) -> String {
 #[cfg(test)]
 mod repo_context_tests {
     use super::*;
+    use crate::test_support::fake_token;
+
+    fn foreign_key() -> String {
+        fake_token("sk-ant", "not-yours")
+    }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("ferrfleet-ctx-{name}"));
@@ -280,14 +285,17 @@ mod repo_context_tests {
     fn a_context_symlinked_out_of_the_checkout_is_refused() {
         let dir = temp_dir("symlink-escape");
         let secret = std::env::temp_dir().join("ferrfleet-ctx-symlink-escape.secret");
-        std::fs::write(&secret, "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-not-yours")
-            .expect("writing the fixture");
+        std::fs::write(
+            &secret,
+            format!("CLAUDE_CODE_OAUTH_TOKEN={}", foreign_key()),
+        )
+        .expect("writing the fixture");
         std::os::unix::fs::symlink(&secret, dir.join(REPO_CONTEXT_DIR).join("pr-agent.md"))
             .expect("linking the fixture");
 
         let out = prompt_with_repo_context("review it", "pr-agent", &dir.to_string_lossy());
         assert!(
-            !out.contains("sk-ant-not-yours"),
+            !out.contains(&foreign_key()),
             "the pod's secret was composed into the prompt"
         );
         assert!(out.contains("carries no `.ferrfleet/pr-agent.md`"));
@@ -322,14 +330,14 @@ mod repo_context_tests {
         let outside = std::env::temp_dir().join("ferrfleet-ctx-symlink-dir.outside");
         let _ = std::fs::remove_dir_all(&outside);
         std::fs::create_dir_all(&outside).expect("creating the fixture");
-        std::fs::write(outside.join("pr-agent.md"), "sk-ant-not-yours").expect("writing");
+        std::fs::write(outside.join("pr-agent.md"), foreign_key()).expect("writing");
 
         std::fs::remove_dir_all(dir.join(REPO_CONTEXT_DIR)).expect("clearing the fixture");
         std::os::unix::fs::symlink(&outside, dir.join(REPO_CONTEXT_DIR))
             .expect("linking the fixture");
 
         let out = prompt_with_repo_context("review it", "pr-agent", &dir.to_string_lossy());
-        assert!(!out.contains("sk-ant-not-yours"));
+        assert!(!out.contains(&foreign_key()));
         assert!(out.contains("carries no `.ferrfleet/pr-agent.md`"));
     }
 }

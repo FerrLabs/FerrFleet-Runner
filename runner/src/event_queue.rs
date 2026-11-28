@@ -225,7 +225,7 @@ mod tests {
     async fn an_error_event_reaches_the_api_without_credentials() {
         let api = FakeApi::start(|_| Reply::status(202)).await;
         let events = EventQueue::start(sender(&api.url));
-        let tok = crate::redact::fake_token("ghs", "abcDEF123");
+        let tok = crate::test_support::fake_token("ghs", "abcDEF123");
 
         events.push(ExecutorEvent::Error {
             message: format!("git clone failed: https://{tok}@github.com/o/r"),

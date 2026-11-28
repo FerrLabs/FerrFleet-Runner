@@ -25,6 +25,8 @@ mod retry;
 mod review_threads;
 mod sender;
 mod subcommands;
+#[cfg(test)]
+mod test_support;
 mod usage;
 mod workspace;
 

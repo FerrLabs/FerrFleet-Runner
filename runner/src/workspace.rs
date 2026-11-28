@@ -365,6 +365,7 @@ mod tests {
         validate_branch_name,
     };
     use crate::config::Env;
+    use crate::test_support::fake_token;
     use ferrfleet_shared::Checkout;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -492,7 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failure_reports_redacted_and_capped_stderr() {
-        let tok = crate::redact::fake_token("ghs", "abcDEF123");
+        let tok = crate::test_support::fake_token("ghs", "abcDEF123");
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(format!(
             "echo 'remote: https://{tok}@github.com/o/r' >&2; \
@@ -709,30 +710,39 @@ mod tests {
         )
     }
 
-    const TOKEN_BODY: &str = r#"{"token":"ghs_abc"}"#;
+    fn token() -> String {
+        fake_token("ghs", "abc")
+    }
+
+    fn token_body() -> String {
+        format!(r#"{{"token":"{}"}}"#, token())
+    }
 
     #[test]
     fn askpass_script_retries_a_refused_connection_then_prints_the_token() {
-        let curl = scripted_curl(&[("", "000", 7), ("", "000", 7), (TOKEN_BODY, "200", 0)]);
+        let body = token_body();
+        let curl = scripted_curl(&[("", "000", 7), ("", "000", 7), (body.as_str(), "200", 0)]);
         let (output, calls) = askpass_with_fake_tools(&curl);
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ghs_abc");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), token());
         assert_eq!(calls.lines().count(), 3);
     }
 
     #[test]
     fn askpass_script_retries_a_503_then_prints_the_token() {
-        let curl = scripted_curl(&[("", "503", 0), (TOKEN_BODY, "200", 0)]);
+        let body = token_body();
+        let curl = scripted_curl(&[("", "503", 0), (body.as_str(), "200", 0)]);
         let (output, calls) = askpass_with_fake_tools(&curl);
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ghs_abc");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), token());
         assert_eq!(calls.lines().count(), 2);
     }
 
     #[test]
     fn askpass_script_does_not_retry_a_502_or_504() {
         for status in ["502", "504"] {
-            let curl = scripted_curl(&[("", status, 0), (TOKEN_BODY, "200", 0)]);
+            let body = token_body();
+            let curl = scripted_curl(&[("", status, 0), (body.as_str(), "200", 0)]);
             let (output, calls) = askpass_with_fake_tools(&curl);
             assert!(!output.status.success(), "{status}");
             assert_eq!(output.stdout, b"", "{status}");
@@ -756,10 +766,11 @@ mod tests {
             "Username for 'https://github.com': ",
             "Password for 'https://github.com/owner/repo': ",
         ] {
-            let curl = scripted_curl(&[(TOKEN_BODY, "200", 0)]);
+            let body = token_body();
+            let curl = scripted_curl(&[(body.as_str(), "200", 0)]);
             let (output, _) = askpass_with_prompt(&curl, prompt);
             assert!(output.status.success(), "{prompt}");
-            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ghs_abc");
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), token());
         }
     }
 
@@ -772,7 +783,8 @@ mod tests {
             "Password for 'http://github.com': ",
             "",
         ] {
-            let curl = scripted_curl(&[(TOKEN_BODY, "200", 0)]);
+            let body = token_body();
+            let curl = scripted_curl(&[(body.as_str(), "200", 0)]);
             let (output, calls) = askpass_with_prompt(&curl, prompt);
             assert!(!output.status.success(), "{prompt}");
             assert_eq!(output.stdout, b"", "{prompt}");
