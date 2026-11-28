@@ -4,6 +4,12 @@ All notable changes to `runner` will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.15.1] - 2026-11-28
+
+### Bug Fixes
+
+- fix(runner): report the git error when workspace preparation fails (#158)
+
 ## [1.15.0] - 2026-11-27
 
 ### Features
