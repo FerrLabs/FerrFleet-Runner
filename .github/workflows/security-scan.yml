@@ -22,6 +22,6 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: FerrLabs/.github/.github/workflows/reusable-security-scan.yml@3caec658e3b3d89f3d9c2d1e8ffe12798def4a43 # main
+    uses: FerrLabs/.github/.github/workflows/reusable-security-scan.yml@598b7c967f0c8388eb0e5df22b9ad8783a2989f0 # main
     secrets:
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}

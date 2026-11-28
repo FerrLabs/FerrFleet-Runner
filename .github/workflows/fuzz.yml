@@ -11,7 +11,7 @@ permissions:
 jobs:
   fuzz:
     name: Fuzz
-    uses: FerrLabs/.github/.github/workflows/reusable-fuzz-rust.yml@3caec658e3b3d89f3d9c2d1e8ffe12798def4a43 # main
+    uses: FerrLabs/.github/.github/workflows/reusable-fuzz-rust.yml@598b7c967f0c8388eb0e5df22b9ad8783a2989f0 # main
     with:
       max-total-time: 180
       timeout-minutes: 30
