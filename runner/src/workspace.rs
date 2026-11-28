@@ -118,26 +118,24 @@ impl GitCredentials {
 /// lancement du CLI plutôt que de laisser l'agent travailler dans un dépôt
 /// à moitié prêt.
 pub async fn prepare(checkout: &Checkout, workdir: &Path, run: &Env) -> Result<GitCredentials> {
-    validate_branch_name(&checkout.branch)
-        .context("etape 'validation du nom de branche' de la preparation du depot")?;
+    validate_branch_name(&checkout.branch).context("step 'branch name validation'")?;
 
     // Créé avant le clone. En cas d'échec de la préparation, il sort de
     // portée ici et son `Drop` supprime le script ; en cas de succès, il est
     // rendu à l'appelant, qui le garde vivant pour la durée du run.
-    let credentials = GitCredentials::create()
-        .context("etape 'preparation du canal d'authentification' de la preparation du depot")?;
+    let credentials = GitCredentials::create().context("step 'git authentication setup'")?;
 
     clone(checkout, workdir, &credentials, run)
         .await
-        .context("etape 'clone' de la preparation du depot")?;
+        .context("step 'clone'")?;
 
     configure_identity(workdir, run)
         .await
-        .context("etape 'configuration de l'identite git' de la preparation du depot")?;
+        .context("step 'git identity configuration'")?;
 
     checkout_branch(checkout, workdir, &credentials, run)
         .await
-        .context("etape 'checkout de la branche' de la preparation du depot")?;
+        .context("step 'checkout of the branch'")?;
 
     Ok(credentials)
 }
@@ -224,7 +222,7 @@ async fn checkout_branch(
             .arg("--")
             .arg(&checkout.branch);
         credentials.apply(&mut fetch_cmd);
-        run_git(fetch_cmd, "git fetch de la branche existante", run).await?;
+        run_git(fetch_cmd, "git fetch of the existing branch", run).await?;
 
         // Un clone `--depth` ne suit que la branche par défaut : le
         // `set-branches` ci-dessus ajoute la branche au refspec d'origin, donc
@@ -243,7 +241,7 @@ async fn checkout_branch(
             .arg(&checkout.branch)
             .arg("--track")
             .arg(format!("refs/remotes/origin/{}", checkout.branch));
-        run_git(checkout_cmd, "git checkout de la branche existante", run).await
+        run_git(checkout_cmd, "git checkout of the existing branch", run).await
     } else {
         info!(branch = %checkout.branch, "creation de la branche de travail");
         let mut cmd = Command::new("git");
@@ -274,31 +272,118 @@ fn validate_branch_name(branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// Lance une commande git et fait échouer avec un message qui nomme
-/// l'étape. Le token n'apparaît plus dans aucun argument depuis le passage
-/// à `GIT_ASKPASS` ; on continue néanmoins à ne jamais faire remonter
-/// stdout/stderr bruts dans le message d'erreur, uniquement le code de
-/// sortie.
+/// Lance une commande git et fait échouer avec un message qui nomme l'étape,
+/// le code de sortie, la cause probable et la sortie d'erreur de git. Le
+/// token n'apparaît dans aucun argument (`GIT_ASKPASS`), mais la sortie est
+/// quand même passée par `redact` avant d'être remontée.
 async fn run_git(mut cmd: Command, step: &str, run: &Env) -> Result<()> {
     run.apply_to(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| format!("lancement de {step}"))?;
+    let output = cmd.output().await.map_err(|err| {
+        anyhow::anyhow!(
+            "could not start {step}: {} ({err})",
+            classify(&err.to_string())
+        )
+    })?;
     if !output.status.success() {
+        let stderr = redact(String::from_utf8_lossy(&output.stderr).trim());
         bail!(
-            "{step} a echoue avec le statut {}: {}",
+            "{step} failed with exit code {} ({}): {stderr}",
             output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr).trim()
+            classify(&stderr)
         );
     }
     Ok(())
 }
 
+/// Range l'échec dans une cause lisible, d'après ce que git a écrit.
+fn classify(stderr: &str) -> &'static str {
+    let lower = stderr.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+    if has(&["no space left on device", "disk quota exceeded"]) {
+        "out of disk space"
+    } else if has(&[
+        "permission denied",
+        "authentication failed",
+        "could not read username",
+        "could not read password",
+        "returned error: 401",
+        "returned error: 403",
+        "write access to repository not granted",
+        "repository not found",
+        "operation not permitted",
+    ]) {
+        "missing permission"
+    } else if has(&[
+        "could not resolve host",
+        "failed to connect",
+        "connection timed out",
+        "connection refused",
+        "connection reset",
+        "tls",
+        "unable to access",
+    ]) {
+        "network failure"
+    } else if has(&[
+        "remote branch",
+        "couldn't find remote ref",
+        "pathspec",
+        "invalid reference",
+        "not a valid object",
+    ]) {
+        "branch or ref not found"
+    } else {
+        "unclassified git failure"
+    }
+}
+
+/// Retire des sorties de git tout ce qui ressemble à un identifiant : mot de
+/// passe dans une URL et tokens GitHub.
+fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let words: Vec<String> = line.split(' ').map(redact_word).collect();
+        out.push_str(&words.join(" "));
+    }
+    out
+}
+
+fn redact_word(word: &str) -> String {
+    if let Some(scheme_end) = word.find("://") {
+        let rest = &word[scheme_end + 3..];
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        if let Some(at) = rest[..authority_end].rfind('@') {
+            let userinfo = &rest[..at];
+            if let Some(colon) = userinfo.find(':') {
+                return format!(
+                    "{}://{}:<redacted>{}",
+                    &word[..scheme_end],
+                    &userinfo[..colon],
+                    &rest[at..]
+                );
+            }
+        }
+    }
+    let trimmed = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+    let is_token = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]
+        .iter()
+        .any(|p| trimmed.starts_with(p));
+    if is_token {
+        word.replace(trimmed, "<redacted>")
+    } else {
+        word.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AskpassScript, GitCredentials, checkout_branch, run_git, validate_branch_name};
+    use super::{
+        AskpassScript, GitCredentials, checkout_branch, classify, prepare, redact, run_git,
+        validate_branch_name,
+    };
     use crate::config::Env;
     use ferrfleet_shared::Checkout;
     use std::os::unix::fs::PermissionsExt;
@@ -407,10 +492,68 @@ mod tests {
             .to_string();
 
         assert!(
-            err.starts_with("git test a echoue avec le statut 1"),
+            err.starts_with("git test failed with exit code 1 (unclassified git failure)"),
             "{err}"
         );
         assert!(err.contains("definitely-not-a-git-command"), "{err}");
+    }
+
+    #[test]
+    fn classify_names_the_cause() {
+        assert_eq!(
+            classify("write error: No space left on device"),
+            "out of disk space"
+        );
+        assert_eq!(
+            classify("remote: Write access to repository not granted.\nfatal: unable to access"),
+            "missing permission"
+        );
+        assert_eq!(
+            classify("fatal: Could not resolve host: github.com"),
+            "network failure"
+        );
+        assert_eq!(
+            classify("fatal: Remote branch foo not found in upstream origin"),
+            "branch or ref not found"
+        );
+        assert_eq!(classify("boom"), "unclassified git failure");
+    }
+
+    #[test]
+    fn redact_strips_url_passwords_and_tokens() {
+        let out = redact(
+            "fatal: unable to access 'https://x-access-token:s3cret@github.com/o/r.git/': 403\ntoken ghs_abcDEF123 end",
+        );
+        assert!(!out.contains("s3cret"), "{out}");
+        assert!(!out.contains("ghs_abcDEF123"), "{out}");
+        assert!(
+            out.contains("x-access-token:<redacted>@github.com"),
+            "{out}"
+        );
+        assert!(out.contains("end"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_failing_clone_reports_the_step_exit_code_and_stderr() {
+        let root = TempRoot(std::env::temp_dir().join(format!("ws-{}", Uuid::new_v4())));
+        std::fs::create_dir_all(&root.0).unwrap();
+        let checkout = Checkout {
+            repo: "o/r".to_owned(),
+            base_branch: Some("no-such-branch".to_owned()),
+            branch: "work".to_owned(),
+            existing: false,
+        };
+        let mut env = test_env();
+        env.api_url = "http://127.0.0.1:1".to_owned();
+
+        let err = match prepare(&checkout, &root, &env).await {
+            Ok(_) => panic!("the clone must fail"),
+            Err(err) => format!("{err:#}"),
+        };
+
+        assert!(err.contains("step 'clone'"), "{err}");
+        assert!(err.contains("git clone failed with exit code"), "{err}");
+        assert!(err.contains("fatal"), "{err}");
     }
 
     #[test]
