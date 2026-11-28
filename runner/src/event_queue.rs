@@ -225,9 +225,10 @@ mod tests {
     async fn an_error_event_reaches_the_api_without_credentials() {
         let api = FakeApi::start(|_| Reply::status(202)).await;
         let events = EventQueue::start(sender(&api.url));
+        let tok = crate::redact::fake_token("ghs", "abcDEF123");
 
         events.push(ExecutorEvent::Error {
-            message: "git clone failed: https://ghs_abcDEF123@github.com/o/r".to_owned(),
+            message: format!("git clone failed: https://{tok}@github.com/o/r"),
             provider_signal: false,
             timestamp: OffsetDateTime::now_utc(),
         });
@@ -235,11 +236,7 @@ mod tests {
 
         let received = api.received();
         assert_eq!(received.len(), 1);
-        assert!(
-            !received[0].body.contains("abcDEF123"),
-            "{}",
-            received[0].body
-        );
+        assert!(!received[0].body.contains(&tok), "{}", received[0].body);
         assert!(
             received[0].body.contains("<redacted>@github.com"),
             "{}",

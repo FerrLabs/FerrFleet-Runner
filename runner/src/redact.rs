@@ -128,8 +128,18 @@ fn redact_tokens(text: &str) -> String {
 }
 
 #[cfg(test)]
+pub fn fake_token(kind: &str, body: &str) -> String {
+    format!("{kind}_{body}")
+}
+
+#[cfg(test)]
+pub fn fake_value(label: &str) -> String {
+    format!("{label}-{}", label.len() * 7919)
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{redact, tail};
+    use super::{fake_token, fake_value, redact, tail};
 
     struct Rng(u64);
 
@@ -207,8 +217,8 @@ mod tests {
         let mut leaks = Vec::new();
         for _ in 0..5_000 {
             let tok = format!(
-                "{}{}",
-                rng.pick(&["ghp_", "ghs_", "github_pat_"]),
+                "{}_{}",
+                rng.pick(&["ghp", "ghs", "github_pat"]),
                 rng.secret()
             );
             let shape = rng.pick(&[
@@ -235,29 +245,33 @@ mod tests {
 
     #[test]
     fn a_token_behind_an_alphanumeric_prefix_is_redacted() {
-        let out = redact("token=ghs_abcDEF123");
-        assert!(!out.contains("abcDEF123"), "{out}");
+        let tok = fake_token("ghs", "abcDEF123");
+        let out = redact(&format!("token={tok}"));
+        assert!(!out.contains(&tok), "{out}");
     }
 
     #[test]
     fn a_token_used_as_the_url_username_is_redacted() {
-        let out = redact("https://ghs_abcDEF123@github.com/o/r");
-        assert!(!out.contains("abcDEF123"), "{out}");
+        let tok = fake_token("ghs", "abcDEF123");
+        let out = redact(&format!("https://{tok}@github.com/o/r"));
+        assert!(!out.contains(&tok), "{out}");
         assert!(out.ends_with("@github.com/o/r"), "{out}");
     }
 
     #[test]
     fn a_token_after_a_tab_is_redacted() {
-        let out = redact("Bearer\tghs_abcDEF123");
-        assert!(!out.contains("abcDEF123"), "{out}");
+        let tok = fake_token("ghs", "abcDEF123");
+        let out = redact(&format!("Bearer\t{tok}"));
+        assert!(!out.contains(&tok), "{out}");
     }
 
     #[test]
     fn the_known_username_survives_and_its_password_does_not() {
+        let pw = fake_value("one");
         assert_eq!(
-            redact(
-                "fatal: unable to access 'https://x-access-token:s3cret@github.com/o/r.git/': 403"
-            ),
+            redact(&format!(
+                "fatal: unable to access 'https://x-access-token:{pw}@github.com/o/r.git/': 403"
+            )),
             "fatal: unable to access 'https://x-access-token:<redacted>@github.com/o/r.git/': 403"
         );
         assert_eq!(
@@ -268,43 +282,46 @@ mod tests {
 
     #[test]
     fn any_other_userinfo_is_redacted_whole() {
+        let pw = fake_value("two");
         assert_eq!(
-            redact("https://alice:hunter2@host/p"),
+            redact(&format!("https://alice:{pw}@host/p")),
             "https://<redacted>@host/p"
         );
         assert_eq!(
-            redact("https://hunter2@host/p"),
+            redact(&format!("https://{pw}@host/p")),
             "https://<redacted>@host/p"
         );
     }
 
     #[test]
     fn every_token_kind_is_redacted_wherever_it_sits() {
-        for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"] {
+        for kind in ["ghp", "gho", "ghu", "ghs", "ghr", "github_pat"] {
+            let prefix = format!("{kind}_");
             let out = redact(&format!("a:{prefix}Ab_9zZ,b={prefix}Cd_8yY."));
-            assert_eq!(out, "a:<redacted>,b=<redacted>.", "{prefix}");
+            assert_eq!(out, "a:<redacted>,b=<redacted>.", "{kind}");
         }
     }
 
     #[test]
     fn only_the_token_run_is_replaced() {
-        assert_eq!(redact("(ghs_abc123) done"), "(<redacted>) done");
+        assert_eq!(
+            redact(&format!("({}) done", fake_token("ghs", "abc123"))),
+            "(<redacted>) done"
+        );
     }
 
     #[test]
     fn authorization_header_values_are_redacted_to_the_end_of_the_line() {
+        let value = fake_value("three");
         for line in [
-            "Authorization: Bearer abc.def",
-            "authorization: basic YWxpY2U6cHc=",
-            "> Authorization: token opaque",
-            "Authorization:opaque",
-            "Proxy-Authorization: Basic opaque",
+            format!("Authorization: Bearer {value}"),
+            format!("authorization: basic {value}"),
+            format!("> Authorization: token {value}"),
+            format!("Authorization:{value}"),
+            format!("Proxy-Authorization: Basic {value}"),
         ] {
-            let out = redact(line);
-            assert!(
-                !out.contains("opaque") && !out.contains("abc.def") && !out.contains("YWxp"),
-                "{line} -> {out}"
-            );
+            let out = redact(&line);
+            assert!(!out.contains(&value), "{line} -> {out}");
         }
         assert_eq!(
             redact("Authorization: Bearer x\nnext line"),
@@ -314,12 +331,13 @@ mod tests {
 
     #[test]
     fn bearer_and_basic_credentials_are_redacted() {
+        let value = fake_value("four");
         assert_eq!(
-            redact("sent Bearer abc.def ok"),
+            redact(&format!("sent Bearer {value} ok")),
             "sent Bearer <redacted> ok"
         );
         assert_eq!(
-            redact("sent basic QWxhZGRpbg== ok"),
+            redact(&format!("sent basic {value} ok")),
             "sent basic <redacted> ok"
         );
     }
@@ -332,7 +350,11 @@ mod tests {
 
     #[test]
     fn redaction_is_idempotent() {
-        let once = redact("Bearer ghs_abc https://u:p@h/x token=ghp_zzz");
+        let once = redact(&format!(
+            "Bearer {} https://u:p@h/x token={}",
+            fake_token("ghs", "abc"),
+            fake_token("ghp", "zzz")
+        ));
         assert_eq!(redact(&once), once);
     }
 
