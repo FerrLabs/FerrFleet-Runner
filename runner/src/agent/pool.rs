@@ -107,7 +107,7 @@ impl PoolClient {
             |attempt| matches!(attempt, Attempt::Retry(_)),
             |attempt, delay| {
                 if let Attempt::Retry(err) = attempt {
-                    warn!(?err, ?delay, "dispatch not accepted; retrying");
+                    warn!(err = %format_args!("{err:#}"), ?delay, "dispatch not accepted; retrying");
                 }
             },
         )

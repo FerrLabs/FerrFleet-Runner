@@ -64,6 +64,42 @@ It holds no credential of its own. The GitHub token it pushes with is minted
 per run by the API, scoped to that run's repository, and fetched at the moment
 it is needed; the private key that mints it never leaves the API.
 
+### What is redacted, and what is not
+
+The agent can print anything it can read, so every event is redacted before it
+leaves the runner, and so is every log line it writes.
+
+Replaced by `<redacted>` wherever they appear, inside longer words too:
+
+- The exact value of every environment variable of the runner whose name has a
+  credential word in it (`TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `AUTH`,
+  `CREDENTIAL`, `COOKIE`, ...): `FERRFLEET_RUN_TOKEN`, `FERRFLEET_POOL_TOKEN`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `GH_TOKEN` and the like, the
+  same names in `CLAUDE_ENV_FILE`, the run token of a leased run, and the
+  connector credentials in the run's MCP configuration (header values, and env
+  values with a credential name).
+- GitHub token shapes (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`),
+  a password in URL userinfo, and the value of an `Authorization:` or
+  `Proxy-Authorization:` header line, as printed by `GIT_CURL_VERBOSE` or
+  `curl -v`.
+- In error events and logs only: the word after `Bearer` or `Basic`. Agent
+  messages, thinking and tool output keep those words as they are.
+
+Limits:
+
+- A value shorter than 8 characters is not registered, and the runner logs the
+  variable name when it skips one.
+- A registered value is replaced even inside an unrelated word or URL.
+- A secret the runner never sees is caught only by its shape: the installation
+  token the agent fetches through `GIT_ASKPASS` is, because of its `ghs_`
+  prefix; an unprefixed credential the agent reads from a file is not.
+- Live deltas are redacted per 150 ms batch. A secret split across two batches
+  shows in two halves on a live viewer. Deltas are not stored, and the final
+  message that is stored is redacted whole.
+- A line that contains `Authorization:` is treated as a header line, so the
+  rest of it is replaced even in prose.
+- Secrets in MCP server arguments or URLs are not registered.
+
 ## Using it from GitHub Actions
 
 The action in this repository does both halves: it creates the run against the

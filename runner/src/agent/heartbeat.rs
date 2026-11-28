@@ -35,7 +35,7 @@ impl Heartbeat {
                     info!(%lost, "heartbeat refused; stopping the run");
                     return;
                 }
-                warn!(?err, "heartbeat failed; trying again on the next beat");
+                warn!(err = %format_args!("{err:#}"), "heartbeat failed; trying again on the next beat");
             }
         }))
     }

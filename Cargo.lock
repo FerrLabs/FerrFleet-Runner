@@ -129,6 +129,7 @@ dependencies = [
 name = "ferrfleet-runner"
 version = "2026.9.2"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "ferrfleet-shared",
  "fs4",

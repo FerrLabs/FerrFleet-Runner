@@ -182,7 +182,7 @@ where
                 }
                 Poll::Throttled => warn!(?retry_delay, "rate limited by FerrFleet; backing off"),
                 Poll::Unavailable(err) => {
-                    warn!(?err, ?retry_delay, "could not reach FerrFleet; backing off");
+                    warn!(err = %format_args!("{err:#}"), ?retry_delay, "could not reach FerrFleet; backing off");
                 }
             }
             tokio::select! {
@@ -279,7 +279,7 @@ fn verdict(outcome: Result<RunOutcome>) -> Ended {
             Ended::RunDone
         }
         Err(err) => {
-            error!(?err, "run failed in the runner");
+            error!(error = %crate::redact::redact(&format!("{err:#}")), "run failed in the runner");
             Ended::RunFailed
         }
     }

@@ -9,7 +9,7 @@ use tokio::time::{MissedTickBehavior, interval_at};
 use tracing::{info, warn};
 
 use crate::delta_buffer::DeltaBuffer;
-use crate::redact::redact;
+use crate::redactor::{Secret, SharedRedactor};
 use crate::sender::EventSender;
 
 const DELTA_INTERVAL: Duration = Duration::from_millis(150);
@@ -25,6 +25,7 @@ struct DeltaLane {
     tx: mpsc::UnboundedSender<Item>,
     buffer: Arc<Mutex<DeltaBuffer>>,
     pending: Arc<AtomicUsize>,
+    redactor: SharedRedactor,
 }
 
 impl DeltaLane {
@@ -35,10 +36,12 @@ impl DeltaLane {
     }
 
     fn release(&self, buffer: &mut DeltaBuffer) {
+        let redactor = self.redactor.current();
         for delta in buffer.drain() {
             if self.pending.load(Ordering::Acquire) >= MAX_PENDING_DELTAS {
                 continue;
             }
+            let delta = redactor.event(delta);
             self.pending.fetch_add(1, Ordering::AcqRel);
             if self.tx.send(Item::Delta(delta)).is_err() {
                 self.pending.fetch_sub(1, Ordering::AcqRel);
@@ -47,16 +50,17 @@ impl DeltaLane {
     }
 
     fn push(&self, event: ExecutorEvent) {
-        let mut buffer = self.buffer();
         if let ExecutorEvent::Delta {
             kind,
             content,
             timestamp,
         } = &event
         {
-            buffer.append(*kind, content, *timestamp);
+            self.buffer().append(*kind, content, *timestamp);
             return;
         }
+        let event = self.redactor.current().event(event);
+        let mut buffer = self.buffer();
         self.release(&mut buffer);
         if self.tx.send(Item::Event(event)).is_err() {
             warn!("event queue is no longer drained; event dropped");
@@ -80,29 +84,15 @@ pub struct EventQueue {
     flush_budget: Duration,
 }
 
-fn redacted(event: ExecutorEvent) -> ExecutorEvent {
-    match event {
-        ExecutorEvent::Error {
-            message,
-            provider_signal,
-            timestamp,
-        } => ExecutorEvent::Error {
-            message: redact(&message),
-            provider_signal,
-            timestamp,
-        },
-        other => other,
-    }
-}
-
 impl EventQueue {
-    pub fn start(sender: EventSender) -> Self {
+    pub fn start(sender: EventSender, redactor: SharedRedactor) -> Self {
         let flush_budget = sender.retry_budget();
         let (tx, mut rx) = mpsc::unbounded_channel::<Item>();
         let lane = DeltaLane {
             tx,
             buffer: Arc::default(),
             pending: Arc::default(),
+            redactor,
         };
         let pending = lane.pending.clone();
         let drain = tokio::spawn(async move {
@@ -119,13 +109,13 @@ impl EventQueue {
                             if let Some(lost) = sender.lost() {
                                 info!(%lost, "run stopped; queued events are dropped");
                             } else {
-                                warn!(?err, "failed to push event to api (continuing)");
+                                warn!(err = %format_args!("{err:#}"), "failed to push event to api (continuing)");
                             }
                         }
                     }
                     Item::Delta(delta) => {
                         if let Err(err) = sender.send_delta(&delta).await {
-                            tracing::debug!(?err, "delta dropped");
+                            tracing::debug!(err = %format_args!("{err:#}"), "delta dropped");
                         }
                     }
                 }
@@ -141,7 +131,11 @@ impl EventQueue {
     }
 
     pub fn push(&self, event: ExecutorEvent) {
-        self.lane.push(redacted(event));
+        self.lane.push(event);
+    }
+
+    pub fn protect(&self, secrets: Vec<Secret>) {
+        self.lane.redactor.add(secrets);
     }
 
     pub async fn flush(self) {
@@ -180,8 +174,10 @@ mod tests {
 
     use super::{DELTA_INTERVAL, DeltaLane, EventQueue, Item, MAX_PENDING_DELTAS};
     use crate::fake_api::{FakeApi, RUN_ID, Received, Reply, dead_api_url, sender};
+    use crate::redactor::{Secret, SharedRedactor};
     use crate::retry::Backoff;
     use crate::sender::EventSender;
+    use crate::test_support::fake_value;
 
     fn message(n: usize) -> ExecutorEvent {
         ExecutorEvent::AssistantMessage {
@@ -206,7 +202,7 @@ mod tests {
         let api = FakeApi::start_later(Duration::from_millis(150), |n| {
             Reply::status(if n < 2 { 503 } else { 202 })
         });
-        let events = EventQueue::start(sender(&api.url));
+        let events = EventQueue::start(sender(&api.url), SharedRedactor::default());
 
         for n in 0..20 {
             events.push(message(n));
@@ -224,7 +220,7 @@ mod tests {
     #[tokio::test]
     async fn an_error_event_reaches_the_api_without_credentials() {
         let api = FakeApi::start(|_| Reply::status(202)).await;
-        let events = EventQueue::start(sender(&api.url));
+        let events = EventQueue::start(sender(&api.url), SharedRedactor::default());
         let sample = crate::test_support::fake_token("ghs", 1);
 
         events.push(ExecutorEvent::Error {
@@ -247,7 +243,7 @@ mod tests {
     #[tokio::test]
     async fn an_event_the_api_refused_does_not_stop_the_ones_behind_it() {
         let api = FakeApi::start(|n| Reply::status(if n == 0 { 500 } else { 202 })).await;
-        let events = EventQueue::start(sender(&api.url));
+        let events = EventQueue::start(sender(&api.url), SharedRedactor::default());
 
         for n in 0..3 {
             events.push(message(n));
@@ -264,11 +260,10 @@ mod tests {
             max_delay: Duration::from_millis(40),
             budget: Duration::from_millis(300),
         };
-        let events = EventQueue::start(EventSender::for_tests(
-            &dead_api_url(),
-            backoff,
-            Duration::from_secs(2),
-        ));
+        let events = EventQueue::start(
+            EventSender::for_tests(&dead_api_url(), backoff, Duration::from_secs(2)),
+            SharedRedactor::default(),
+        );
         for n in 0..5 {
             events.push(message(n));
         }
@@ -297,6 +292,7 @@ mod tests {
             tx,
             buffer: Arc::default(),
             pending: Arc::default(),
+            redactor: SharedRedactor::default(),
         };
         (lane, rx)
     }
@@ -411,7 +407,7 @@ mod tests {
             }
         })
         .await;
-        let queue = EventQueue::start(sender(&api.url));
+        let queue = EventQueue::start(sender(&api.url), SharedRedactor::default());
 
         queue.push(delta(DeltaKind::Text, "live"));
         tokio::time::sleep(DELTA_INTERVAL * 2).await;
@@ -440,7 +436,7 @@ mod tests {
     #[tokio::test]
     async fn the_api_receives_a_delta_before_the_event_it_belongs_to() {
         let api = FakeApi::start(|_| Reply::status(202)).await;
-        let queue = EventQueue::start(sender(&api.url));
+        let queue = EventQueue::start(sender(&api.url), SharedRedactor::default());
 
         queue.push(delta(DeltaKind::Text, "full "));
         queue.push(delta(DeltaKind::Text, "text"));
@@ -464,6 +460,96 @@ mod tests {
                 ("delta".to_owned(), "full text".to_owned()),
                 ("assistant_message".to_owned(), "9".to_owned())
             ]
+        );
+    }
+
+    fn guarded_lane(secret: &str) -> (DeltaLane, mpsc::UnboundedReceiver<Item>) {
+        let (lane, rx) = lane();
+        lane.redactor
+            .reset(vec![Secret::new("FERRFLEET_RUN_TOKEN", secret).unwrap()]);
+        (lane, rx)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_token_split_across_two_chunks_of_one_interval_is_redacted() {
+        let token = fake_value(108);
+        let (lane, mut rx) = guarded_lane(&token);
+        tokio::spawn(lane.clone().release_every_interval());
+
+        let (head, tail) = token.split_at(token.len() / 2);
+        lane.push(delta(DeltaKind::Text, &format!("env: TOKEN={head}")));
+        lane.push(delta(DeltaKind::Text, &format!("{tail} done")));
+        tokio::time::sleep(DELTA_INTERVAL + Duration::from_millis(1)).await;
+
+        assert_eq!(shape(&mut rx), ["delta:Text:env: TOKEN=<redacted> done"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_token_split_across_two_intervals_is_never_whole_in_a_delta_and_the_message_is_redacted()
+     {
+        let token = fake_value(108);
+        let (lane, mut rx) = guarded_lane(&token);
+        tokio::spawn(lane.clone().release_every_interval());
+
+        let (head, tail) = token.split_at(token.len() / 2);
+        lane.push(delta(DeltaKind::Text, head));
+        tokio::time::sleep(DELTA_INTERVAL + Duration::from_millis(1)).await;
+        lane.push(delta(DeltaKind::Text, tail));
+        lane.push(ExecutorEvent::AssistantMessage {
+            content: token.clone(),
+            timestamp: OffsetDateTime::now_utc(),
+        });
+
+        let sent = shape(&mut rx);
+        assert_eq!(
+            sent,
+            [
+                format!("delta:Text:{head}"),
+                format!("delta:Text:{tail}"),
+                "event:<redacted>".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn every_event_kind_reaches_the_api_without_the_run_token() {
+        let api = FakeApi::start(|_| Reply::status(202)).await;
+        let redactor = SharedRedactor::default();
+        let queue = EventQueue::start(sender(&api.url), redactor.clone());
+        let token = fake_value(109);
+        let at = OffsetDateTime::now_utc();
+        queue.protect(vec![Secret::new("FERRFLEET_RUN_TOKEN", &token).unwrap()]);
+
+        let leak = format!("FERRFLEET_RUN_TOKEN={token}");
+        queue.push(delta(DeltaKind::Thinking, &leak));
+        queue.push(ExecutorEvent::Thinking {
+            content: leak.clone(),
+            timestamp: at,
+        });
+        queue.push(ExecutorEvent::ToolUse {
+            tool_name: "Bash".to_owned(),
+            tool_use_id: "toolu_1".to_owned(),
+            input: serde_json::json!({"command": format!("echo {token}")}),
+            timestamp: at,
+        });
+        queue.push(ExecutorEvent::ToolResult {
+            tool_use_id: "toolu_1".to_owned(),
+            output: serde_json::json!([{"type": "text", "text": leak}]),
+            is_error: false,
+            timestamp: at,
+        });
+        queue.push(message(1));
+        queue.flush().await;
+
+        let bodies: Vec<String> = api.received().into_iter().map(|r| r.body).collect();
+        assert_eq!(bodies.len(), 5, "{bodies:?}");
+        for body in &bodies {
+            assert!(!body.contains(&token), "{body}");
+        }
+        assert!(
+            bodies[3].contains("FERRFLEET_RUN_TOKEN=<redacted>"),
+            "{}",
+            bodies[3]
         );
     }
 }
