@@ -334,18 +334,6 @@ fn classify(stderr: &str) -> &'static str {
     ]) {
         "missing permission"
     } else if has(&[
-        "could not resolve host",
-        "failed to connect",
-        "connection timed out",
-        "connection refused",
-        "connection reset",
-        "ssl",
-        "tls handshake",
-        "gnutls",
-        "unable to access",
-    ]) {
-        "network failure"
-    } else if has(&[
         "remote branch",
         "couldn't find remote ref",
         "pathspec",
@@ -353,6 +341,20 @@ fn classify(stderr: &str) -> &'static str {
         "not a valid object",
     ]) {
         "branch or ref not found"
+    } else if has(&[
+        "could not resolve host",
+        "failed to connect",
+        "connection timed out",
+        "connection refused",
+        "connection reset",
+        "ssl routines",
+        "ssl certificate",
+        "ssl_connect",
+        "tls handshake",
+        "gnutls",
+        "unable to access",
+    ]) {
+        "network failure"
     } else {
         "unclassified git failure"
     }
@@ -533,6 +535,14 @@ mod tests {
         assert_eq!(classify("boom"), "unclassified git failure");
         assert_eq!(
             classify("fatal: couldn't find remote ref refs/heads/tls-fix"),
+            "branch or ref not found"
+        );
+        assert_eq!(
+            classify("fatal: Remote branch ssl-fix not found in upstream origin"),
+            "branch or ref not found"
+        );
+        assert_eq!(
+            classify("fatal: couldn't find remote ref refs/heads/openssl-bump"),
             "branch or ref not found"
         );
         assert_eq!(

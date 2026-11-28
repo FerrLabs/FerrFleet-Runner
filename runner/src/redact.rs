@@ -12,7 +12,10 @@ enum Pending {
 }
 
 pub fn redact(text: &str) -> String {
-    text.lines().map(redact_line).collect::<Vec<_>>().join("\n")
+    text.split('\n')
+        .map(redact_line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn tail(text: &str, max_lines: usize, max_bytes: usize) -> String {
@@ -56,7 +59,8 @@ fn redact_leading_word(word: &str, out: &mut String) -> Pending {
     for name in HEADER_NAMES {
         if let Some(at) = lower.find(name) {
             let value_start = at + name.len();
-            out.push_str(&word[..value_start]);
+            out.push_str(&redact_word(&word[..at]));
+            out.push_str(&word[at..value_start]);
             if value_start < word.len() {
                 out.push_str(REDACTED);
             }
@@ -82,9 +86,7 @@ fn redact_userinfo(word: &str) -> String {
     while let Some(at) = rest.find("://") {
         let (head, after) = rest.split_at(at + 3);
         out.push_str(head);
-        let authority_end = after
-            .find(['/', '?', '#', '\'', '"'])
-            .unwrap_or(after.len());
+        let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
         match after[..authority_end].rfind('@') {
             Some(sign) => {
                 out.push_str(&redact_credentials(&after[..sign]));
@@ -242,6 +244,91 @@ mod tests {
             leaks.len(),
             leaks.first()
         );
+    }
+
+    const SWEEP: usize = 100_000;
+
+    fn leak_count(rng: &mut Rng, build: impl Fn(&mut Rng) -> (String, String)) -> usize {
+        (0..SWEEP)
+            .filter(|_| {
+                let (line, needle) = build(rng);
+                redact(&line).contains(&needle)
+            })
+            .count()
+    }
+
+    #[test]
+    fn a_token_glued_to_an_auth_header_name_never_survives_the_sweep() {
+        let mut rng = Rng(11);
+        let leaks = leak_count(&mut rng, |rng| {
+            let sample = format!("{}_{}", rng.pick(&["ghp", "ghs", "gho"]), rng.sample());
+            let shape = rng.pick(&[
+                "{t},authorization:",
+                "{t}authorization:",
+                "x{t}Authorization:y",
+                "{t}:proxy-authorization: v",
+                "'{t}'authorization:",
+            ]);
+            (shape.replace("{t}", &sample), sample)
+        });
+        assert_eq!(leaks, 0, "{leaks} of {SWEEP} leaked");
+    }
+
+    #[test]
+    fn a_userinfo_password_with_a_raw_quote_never_survives_the_sweep() {
+        let mut rng = Rng(13);
+        let leaks = leak_count(&mut rng, |rng| {
+            let credential = format!("{}'{}", rng.sample(), rng.sample());
+            let user = rng.pick(&["u", "x-access-token", "alice"]);
+            let wrap = rng.pick(&["", "'", "\"", "("]);
+            let line = format!("{wrap}https://{user}:{credential}@host/x{wrap}");
+            (line, credential)
+        });
+        assert_eq!(leaks, 0, "{leaks} of {SWEEP} leaked");
+    }
+
+    #[test]
+    fn redaction_is_idempotent_over_the_sweep() {
+        let mut rng = Rng(17);
+        let mut unstable = 0;
+        for _ in 0..SWEEP {
+            let n = rng.below(12);
+            let mut line: String = (0..n).map(|_| rng.pick(NOISE)).collect();
+            line.push_str(rng.pick(&["", "\n", "\n\n", "\r\n", " Bearer ", "\nAuthorization: x"]));
+            let once = redact(&line);
+            if redact(&once) != once {
+                unstable += 1;
+            }
+        }
+        assert_eq!(unstable, 0, "{unstable} of {SWEEP} not idempotent");
+    }
+
+    #[test]
+    fn a_token_glued_before_an_auth_header_name_is_redacted() {
+        let sample = fake_token("ghs", 21);
+        let out = redact(&format!("{sample},authorization:"));
+        assert_eq!(out, "<redacted>,authorization:");
+    }
+
+    #[test]
+    fn a_userinfo_password_with_a_raw_quote_is_redacted() {
+        let credential = format!("{}'{}", fake_value(22), fake_value(23));
+        let out = redact(&format!("https://u:{credential}@host/x"));
+        assert_eq!(out, "https://<redacted>@host/x");
+    }
+
+    #[test]
+    fn a_quoted_url_in_prose_still_loses_its_password() {
+        let credential = fake_value(24);
+        let out = redact(&format!("fatal: 'https://u:{credential}@host' failed"));
+        assert_eq!(out, "fatal: 'https://<redacted>@host' failed");
+    }
+
+    #[test]
+    fn trailing_newlines_are_preserved() {
+        assert_eq!(redact("a\n\n"), "a\n\n");
+        assert_eq!(redact("a\n"), "a\n");
+        assert_eq!(redact(""), "");
     }
 
     #[test]
