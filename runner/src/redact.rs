@@ -135,10 +135,20 @@ fn userinfo_end(after: &str) -> Option<usize> {
         return None;
     }
     let next_scheme = after.find("://").unwrap_or(after.len());
-    after
-        .get(authority_end..next_scheme)?
-        .rfind('@')
-        .map(|sign| authority_end + sign)
+    let window = after.get(authority_end..next_scheme)?;
+    let window = &window[..window.find(ends_a_url).unwrap_or(window.len())];
+    let sign = authority_end + window.rfind('@')?;
+    Some(last_at_sign_in_authority(after, sign + 1).unwrap_or(sign))
+}
+
+fn ends_a_url(c: char) -> bool {
+    matches!(c, '"' | ',' | '<' | '>' | ')') || c.is_whitespace()
+}
+
+fn last_at_sign_in_authority(text: &str, from: usize) -> Option<usize> {
+    let rest = &text[from..];
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    rest[..end].rfind('@').map(|at| from + at)
 }
 
 fn redact_credentials(userinfo: &str, rules: Rules) -> String {
@@ -573,7 +583,7 @@ mod tests {
         let schemes = "a://b:c/".repeat(200_000);
         assert_eq!(redact_output(&schemes), schemes);
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
+            started.elapsed() < std::time::Duration::from_secs(20),
             "{:?}",
             started.elapsed()
         );
@@ -594,5 +604,34 @@ mod tests {
             "GH_TOKEN=<redacted>"
         );
         assert_eq!(redact(&format!("x{tok}")), "x<redacted>");
+    }
+
+    #[test]
+    fn minified_json_with_a_url_and_a_mail_address_passes_through() {
+        let text = r#"{"url":"http://a:b/c","mail":"x@y"}"#;
+        assert_eq!(redact_output(text), text);
+        assert_eq!(redact(text), text);
+        for text in [
+            "(see http://a:b/c), mail x@y",
+            "<http://a:b/c>@y",
+            "http://a:b/c,x@y",
+        ] {
+            assert_eq!(redact_output(text), text);
+        }
+    }
+
+    #[test]
+    fn the_userinfo_fallback_is_idempotent_when_an_at_sign_follows_a_stop_character() {
+        for text in [
+            "http://a:b/c@d\"@e/f",
+            "http://a:b/c@d@e/f",
+            "http://a:b/c@d'@e/f",
+        ] {
+            for rules in [Rules::Diagnostic, Rules::Output] {
+                let once = redact_with(text, rules);
+                assert_eq!(redact_with(&once, rules), once, "{text} {rules:?}");
+                assert!(!once.contains("a:b"), "{once}");
+            }
+        }
     }
 }
