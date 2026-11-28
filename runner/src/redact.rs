@@ -1,8 +1,23 @@
-const REDACTED: &str = "<redacted>";
+use std::sync::LazyLock;
+
+use aho_corasick::AhoCorasick;
+
+pub const REDACTED: &str = "<redacted>";
 const KNOWN_USERNAME: &str = "x-access-token";
 const TOKEN_PREFIXES: [&str; 6] = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"];
 const HEADER_NAMES: [&str; 2] = ["proxy-authorization:", "authorization:"];
 const CREDENTIAL_SCHEMES: [&str; 2] = ["bearer", "basic"];
+const MIN_TOKEN_BODY: usize = 8;
+
+static TOKEN_PREFIX_MATCHER: LazyLock<AhoCorasick> = LazyLock::new(|| {
+    AhoCorasick::new(TOKEN_PREFIXES).expect("the token prefixes are valid patterns")
+});
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Rules {
+    Diagnostic,
+    Output,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Pending {
@@ -12,8 +27,16 @@ enum Pending {
 }
 
 pub fn redact(text: &str) -> String {
+    redact_with(text, Rules::Diagnostic)
+}
+
+pub fn redact_output(text: &str) -> String {
+    redact_with(text, Rules::Output)
+}
+
+pub fn redact_with(text: &str, rules: Rules) -> String {
     text.split('\n')
-        .map(redact_line)
+        .map(|line| redact_line(line, rules))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -28,7 +51,7 @@ pub fn tail(text: &str, max_lines: usize, max_bytes: usize) -> String {
     kept[start..].to_owned()
 }
 
-fn redact_line(line: &str) -> String {
+fn redact_line(line: &str, rules: Rules) -> String {
     let mut out = String::with_capacity(line.len());
     let mut pending = Pending::Nothing;
     let mut rest = line;
@@ -48,18 +71,18 @@ fn redact_line(line: &str) -> String {
                 out.push_str(REDACTED);
                 pending = Pending::Nothing;
             }
-            Pending::Nothing => pending = redact_leading_word(word, &mut out),
+            Pending::Nothing => pending = redact_leading_word(word, rules, &mut out),
         }
     }
     out
 }
 
-fn redact_leading_word(word: &str, out: &mut String) -> Pending {
+fn redact_leading_word(word: &str, rules: Rules, out: &mut String) -> Pending {
     let lower = word.to_ascii_lowercase();
     for name in HEADER_NAMES {
         if let Some(at) = lower.find(name) {
             let value_start = at + name.len();
-            out.push_str(&redact_word(&word[..at]));
+            out.push_str(&redact_word(&word[..at], rules));
             out.push_str(&word[at..value_start]);
             if value_start < word.len() {
                 out.push_str(REDACTED);
@@ -67,29 +90,28 @@ fn redact_leading_word(word: &str, out: &mut String) -> Pending {
             return Pending::RestOfLine;
         }
     }
-    out.push_str(&redact_word(word));
+    out.push_str(&redact_word(word, rules));
     let bare = lower.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-    if CREDENTIAL_SCHEMES.contains(&bare) {
+    if rules == Rules::Diagnostic && CREDENTIAL_SCHEMES.contains(&bare) {
         Pending::NextWord
     } else {
         Pending::Nothing
     }
 }
 
-fn redact_word(word: &str) -> String {
-    redact_tokens(&redact_userinfo(word))
+fn redact_word(word: &str, rules: Rules) -> String {
+    redact_tokens(&redact_userinfo(word, rules), rules)
 }
 
-fn redact_userinfo(word: &str) -> String {
+fn redact_userinfo(word: &str, rules: Rules) -> String {
     let mut out = String::with_capacity(word.len());
     let mut rest = word;
     while let Some(at) = rest.find("://") {
         let (head, after) = rest.split_at(at + 3);
         out.push_str(head);
-        let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
-        match after[..authority_end].rfind('@') {
+        match userinfo_end(after) {
             Some(sign) => {
-                out.push_str(&redact_credentials(&after[..sign]));
+                out.push_str(&redact_credentials(&after[..sign], rules));
                 rest = &after[sign..];
             }
             None => rest = after,
@@ -99,76 +121,71 @@ fn redact_userinfo(word: &str) -> String {
     out
 }
 
-fn redact_credentials(userinfo: &str) -> String {
+fn userinfo_end(after: &str) -> Option<usize> {
+    let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
+    let authority = &after[..authority_end];
+    if let Some(sign) = authority.rfind('@') {
+        return Some(sign);
+    }
+    if authority.starts_with('[') {
+        return None;
+    }
+    let (_, port) = authority.split_once(':')?;
+    if port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let next_scheme = after.find("://").unwrap_or(after.len());
+    after
+        .get(authority_end..next_scheme)?
+        .rfind('@')
+        .map(|sign| authority_end + sign)
+}
+
+fn redact_credentials(userinfo: &str, rules: Rules) -> String {
     if userinfo == KNOWN_USERNAME {
         userinfo.to_owned()
     } else if userinfo.starts_with(&format!("{KNOWN_USERNAME}:")) {
         format!("{KNOWN_USERNAME}:{REDACTED}")
+    } else if rules == Rules::Output && !userinfo.contains(':') {
+        userinfo.to_owned()
     } else {
         REDACTED.to_owned()
     }
 }
 
-fn redact_tokens(text: &str) -> String {
+fn redact_tokens(text: &str, rules: Rules) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some((at, prefix)) = TOKEN_PREFIXES
-        .iter()
-        .filter_map(|prefix| rest.find(prefix).map(|at| (at, prefix)))
-        .min_by_key(|(at, _)| *at)
-    {
-        out.push_str(&rest[..at]);
-        out.push_str(REDACTED);
-        let after = &rest[at + prefix.len()..];
+    while let Some(found) = TOKEN_PREFIX_MATCHER.find(rest) {
+        out.push_str(&rest[..found.start()]);
+        let after = &rest[found.end()..];
         let run = after
             .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
             .unwrap_or(after.len());
+        if rules == Rules::Output && !looks_like_a_token(&out, run) {
+            out.push_str(&rest[found.start()..found.end()]);
+            rest = after;
+            continue;
+        }
+        out.push_str(REDACTED);
         rest = &after[run..];
     }
     out.push_str(rest);
     out
 }
 
+fn looks_like_a_token(before: &str, body_len: usize) -> bool {
+    let glued = before
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    !glued && body_len >= MIN_TOKEN_BODY
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{redact, tail};
-    use crate::test_support::{fake_token, fake_value};
-
-    struct Rng(u64);
-
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-
-        fn below(&mut self, n: usize) -> usize {
-            let n = u64::try_from(n).unwrap();
-            usize::try_from(self.next() % n).unwrap()
-        }
-
-        fn pick<'a>(&mut self, xs: &[&'a str]) -> &'a str {
-            xs[self.below(xs.len())]
-        }
-
-        fn alnum(&mut self) -> char {
-            let digit = u32::try_from(self.below(62)).unwrap();
-            match digit {
-                0..=9 => char::from_digit(digit, 10).unwrap(),
-                10..=35 => char::from_digit(digit, 36).unwrap(),
-                _ => char::from_digit(digit - 26, 36)
-                    .unwrap()
-                    .to_ascii_uppercase(),
-            }
-        }
-
-        fn sample(&mut self) -> String {
-            let n = 8 + self.below(20);
-            (0..n).map(|_| self.alnum()).collect()
-        }
-    }
+    use super::{Rules, redact, redact_output, redact_with, tail};
+    use crate::test_support::{Rng, fake_token, fake_value};
 
     const NOISE: &[&str] = &[
         "fatal:",
@@ -295,9 +312,11 @@ mod tests {
             let n = rng.below(12);
             let mut line: String = (0..n).map(|_| rng.pick(NOISE)).collect();
             line.push_str(rng.pick(&["", "\n", "\n\n", "\r\n", " Bearer ", "\nAuthorization: x"]));
-            let once = redact(&line);
-            if redact(&once) != once {
-                unstable += 1;
+            for rules in [Rules::Diagnostic, Rules::Output] {
+                let once = redact_with(&line, rules);
+                if redact_with(&once, rules) != once {
+                    unstable += 1;
+                }
             }
         }
         assert_eq!(unstable, 0, "{unstable} of {SWEEP} not idempotent");
@@ -468,5 +487,112 @@ mod tests {
     #[test]
     fn tail_leaves_short_text_alone() {
         assert_eq!(tail("a\nb", 20, 4096), "a\nb");
+    }
+
+    #[test]
+    fn userinfo_with_an_unencoded_slash_question_mark_or_hash_is_redacted() {
+        let value = fake_value(104);
+        for sep in ['/', '?', '#'] {
+            let secret = format!("{value}{sep}tail");
+            for rules in [Rules::Diagnostic, Rules::Output] {
+                let out = redact_with(
+                    &format!("https://x-access-token:{secret}@github.com/o/r"),
+                    rules,
+                );
+                assert_eq!(
+                    out, "https://x-access-token:<redacted>@github.com/o/r",
+                    "{sep} {rules:?}"
+                );
+                let out = redact_with(&format!("https://alice:{secret}@host/p"), rules);
+                assert_eq!(out, "https://<redacted>@host/p", "{sep} {rules:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_port_or_an_at_sign_in_the_path_is_not_mistaken_for_userinfo() {
+        for text in [
+            "https://host:8443/a@b",
+            "https://registry.example/@scope/pkg",
+            "http://[::1]:8080/x@y",
+            "https://host/p?q=a@b",
+        ] {
+            assert_eq!(redact(text), text);
+            assert_eq!(redact_output(text), text);
+        }
+    }
+
+    #[test]
+    fn output_rules_keep_a_bare_username_and_diagnostics_do_not() {
+        let text = "origin\tssh://git@github.com/o/r.git (fetch)";
+        assert_eq!(redact_output(text), text);
+        assert_eq!(
+            redact(text),
+            "origin\tssh://<redacted>@github.com/o/r.git (fetch)"
+        );
+    }
+
+    #[test]
+    fn git_trace_and_curl_verbose_authorization_lines_are_redacted() {
+        let value = fake_value(105);
+        let trace = format!(
+            "12:00:00.000000 http.c:756              => Send header: Authorization: Basic {value}\n\
+             12:00:00.000001 http.c:756              => Send header: Accept: */*\n\
+             > Authorization: Bearer {value}\n\
+             < HTTP/2 200"
+        );
+        for rules in [Rules::Diagnostic, Rules::Output] {
+            let out = redact_with(&trace, rules);
+            assert!(!out.contains(&value), "{rules:?}: {out}");
+            assert!(out.contains("Send header: Authorization: <redacted> <redacted>\n"));
+            assert!(out.contains("Send header: Accept: */*\n"));
+            assert!(out.ends_with("< HTTP/2 200"));
+        }
+    }
+
+    #[test]
+    fn output_rules_leave_the_words_basic_and_bearer_alone() {
+        let text = "Basic usage: the Bearer of this note is a basic example";
+        assert_eq!(redact_output(text), text);
+    }
+
+    #[test]
+    fn line_endings_survive_byte_for_byte() {
+        for text in ["a\n", "a\r\nb\r\n", "\n\n", "x\n\ny\n", ""] {
+            assert_eq!(redact(text), text, "{text:?}");
+            assert_eq!(redact_output(text), text, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn token_and_userinfo_scans_stay_linear_on_one_huge_word() {
+        let word = format!("{},", fake_token("ghp", 106)).repeat(200_000);
+        let started = std::time::Instant::now();
+        let out = redact_output(&word);
+        assert_eq!(out, "<redacted>,".repeat(200_000));
+        let schemes = "a://b:c/".repeat(200_000);
+        assert_eq!(redact_output(&schemes), schemes);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn output_rules_only_redact_a_whole_token_shape() {
+        for text in [
+            "fn highs_and_lows() {}",
+            "the ghs_ prefix marks an installation token",
+            "let ghp_count = 3;",
+        ] {
+            assert_eq!(redact_output(text), text);
+        }
+        let tok = fake_token("ghs", 107);
+        assert_eq!(
+            redact_output(&format!("GH_TOKEN={tok}")),
+            "GH_TOKEN=<redacted>"
+        );
+        assert_eq!(redact(&format!("x{tok}")), "x<redacted>");
     }
 }

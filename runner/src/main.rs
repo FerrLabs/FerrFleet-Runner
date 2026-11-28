@@ -14,15 +14,18 @@ mod event_queue;
 #[cfg(test)]
 mod fake_api;
 mod lease;
+mod log_redaction;
 mod mcp_config;
 mod mcp_preflight;
 mod private_file;
 mod reaper;
 mod redact;
+mod redactor;
 mod repo_context;
 mod resources;
 mod retry;
 mod review_threads;
+mod secrets;
 mod sender;
 mod subcommands;
 #[cfg(test)]
@@ -97,7 +100,9 @@ pub enum RunOutcome {
 }
 
 async fn supervise(env: &Env, sender: &EventSender) -> Result<RunOutcome> {
-    let queue = EventQueue::start(sender.clone());
+    let redactor = log_redaction::shared();
+    redactor.reset(secrets::of_run(env));
+    let queue = EventQueue::start(sender.clone(), redactor);
 
     let outcome = match (run(env, sender, &queue).await, sender.lost()) {
         (_, Some(lost)) => {
@@ -148,6 +153,7 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<RunO
         }
     }
 
+    queue.protect(secrets::of_mcp(cfg.mcp_config.as_ref()));
     apply_working_dir_override(&mut cfg, env.working_dir.as_deref())?;
 
     // Garde le canal d'authentification git vivant pour toute la duree du
@@ -182,7 +188,7 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<RunO
         Ok(Streamed::Exited(code)) => code,
         Ok(Streamed::Stopped(lost)) => return Ok(RunOutcome::Stopped(lost)),
         Err(err) => {
-            warn!(?err, "claude execution failed");
+            warn!(error = %redact::redact(&format!("{err:#}")), "claude execution failed");
             queue.push(ExecutorEvent::Error {
                 message: format!("claude execution failed: {err:#}"),
                 provider_signal: false,
@@ -316,8 +322,16 @@ fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer().json())
+        .with(
+            fmt::layer()
+                .json()
+                .with_writer(log_redaction::RedactingMakeWriter::new(
+                    log_redaction::shared(),
+                    std::io::stdout,
+                )),
+        )
         .init();
+    log_redaction::shared().reset(secrets::of_process());
 }
 
 #[cfg(test)]

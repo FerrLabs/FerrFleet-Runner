@@ -293,7 +293,8 @@ async fn a_conflict_on_events_stops_the_run_and_drops_what_is_still_queued() {
         move |_, sender| {
             let stopped = stopped.clone();
             async move {
-                let queue = EventQueue::start(sender.clone());
+                let queue =
+                    EventQueue::start(sender.clone(), crate::redactor::SharedRedactor::default());
                 for _ in 0..3 {
                     queue.push(event());
                 }

@@ -19,6 +19,7 @@ fs4 = { workspace = true }
 rustix = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+aho-corasick = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }

@@ -1,5 +1,7 @@
 use crate::config::Env;
+use crate::redactor::Redactor;
 use crate::review_threads;
+use crate::secrets;
 use crate::sender::EventSender;
 use anyhow::{Context, Result, bail};
 use tracing::info;
@@ -27,6 +29,7 @@ pub(crate) async fn result(args: &[String]) -> Result<()> {
     let result = read_result_argument(arg)?;
 
     let env = Env::from_env().context("loading environment")?;
+    let result = Redactor::new(secrets::of_run(&env)).json(result);
     let sender = EventSender::new(env);
     sender
         .report_result(&result)

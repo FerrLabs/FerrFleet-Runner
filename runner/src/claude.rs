@@ -4,6 +4,7 @@ use crate::event_queue::EventQueue;
 use crate::lease::Lost;
 use crate::private_file::PrivateFile;
 use crate::reaper::Reaper;
+use crate::redact::redact_output;
 use crate::repo_context::prompt_with_repo_context;
 use crate::{claude_version, mcp_config, mcp_preflight, usage, workspace};
 use anyhow::{Context, Result};
@@ -54,6 +55,19 @@ fn appended_system_prompt(stable: Option<&str>) -> String {
     }
 }
 
+pub fn claude_env_path() -> String {
+    std::env::var("CLAUDE_ENV_FILE").unwrap_or_else(|_| "/vault/secrets/claude.env".to_string())
+}
+
+pub fn env_file_entries(contents: &str) -> impl Iterator<Item = (&str, &str)> {
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.trim(), value.trim()))
+}
+
 /// Loads the KEY=VALUE lines of a credentials file into the claude subprocess,
 /// for a host that provisions `CLAUDE_CODE_OAUTH_TOKEN` as a file rather than
 /// in the process environment. The file is `CLAUDE_ENV_FILE`, defaulting to
@@ -67,20 +81,13 @@ fn appended_system_prompt(stable: Option<&str>) -> String {
 /// unauthenticated, with zero tokens and no session, which looks like a silent
 /// no-op run.
 fn load_claude_credentials(cmd: &mut Command) {
-    let claude_env_path = std::env::var("CLAUDE_ENV_FILE")
-        .unwrap_or_else(|_| "/vault/secrets/claude.env".to_string());
+    let claude_env_path = claude_env_path();
     match std::fs::read_to_string(&claude_env_path) {
         Ok(contents) => {
             let mut loaded = 0u32;
-            for line in contents.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some((key, value)) = line.split_once('=') {
-                    cmd.env(key.trim(), value.trim());
-                    loaded += 1;
-                }
+            for (key, value) in env_file_entries(&contents) {
+                cmd.env(key, value);
+                loaded += 1;
             }
             info!(path = %claude_env_path, vars = loaded, "loaded claude credentials from vault file");
         }
@@ -310,7 +317,7 @@ async fn stream_child(
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if !line.trim().is_empty() {
-                warn!(target: "claude.stderr", "{line}");
+                warn!(target: "claude.stderr", "{}", redact_output(&line));
             }
         }
     });
@@ -353,7 +360,7 @@ async fn stream_child(
                     }
                 }
                 Err(err) => {
-                    warn!(%err, raw = %line, "could not parse claude output line");
+                    warn!(%err, raw = %redact_output(&line), "could not parse claude output line");
                 }
             }
         }
@@ -861,7 +868,10 @@ mod stop_tests {
 
     async fn stream(child: Child, timeout: Duration, stop_after: Option<Duration>) -> Streamed {
         let reaper = reaper_under(&child);
-        let queue = EventQueue::start(fake_api::sender(&fake_api::dead_api_url()));
+        let queue = EventQueue::start(
+            fake_api::sender(&fake_api::dead_api_url()),
+            crate::redactor::SharedRedactor::default(),
+        );
         let mut totals = TokenTotals::default();
         let mut session_id = None;
         stream_child(
@@ -990,7 +1000,10 @@ mod stop_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         let _ = std::fs::remove_file(&pidfile);
-        let queue = EventQueue::start(fake_api::sender(&fake_api::dead_api_url()));
+        let queue = EventQueue::start(
+            fake_api::sender(&fake_api::dead_api_url()),
+            crate::redactor::SharedRedactor::default(),
+        );
         let mut totals = TokenTotals::default();
         let mut session_id = None;
 
@@ -1070,7 +1083,10 @@ mod stop_tests {
             .spawn()
             .expect("spawning a stand-in for claude");
         let pid = child.id().expect("a running child has a pid");
-        let queue = EventQueue::start(fake_api::sender(&fake_api::dead_api_url()));
+        let queue = EventQueue::start(
+            fake_api::sender(&fake_api::dead_api_url()),
+            crate::redactor::SharedRedactor::default(),
+        );
         let mut totals = TokenTotals::default();
         let mut session_id = None;
 

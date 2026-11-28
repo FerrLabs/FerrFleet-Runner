@@ -279,7 +279,7 @@ fn verdict(outcome: Result<RunOutcome>) -> Ended {
             Ended::RunDone
         }
         Err(err) => {
-            error!(?err, "run failed in the runner");
+            error!(error = %crate::redact::redact(&format!("{err:#}")), "run failed in the runner");
             Ended::RunFailed
         }
     }
