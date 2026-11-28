@@ -18,12 +18,15 @@ mod mcp_config;
 mod mcp_preflight;
 mod private_file;
 mod reaper;
+mod redact;
 mod repo_context;
 mod resources;
 mod retry;
 mod review_threads;
 mod sender;
 mod subcommands;
+#[cfg(test)]
+mod test_support;
 mod usage;
 mod workspace;
 
@@ -103,9 +106,9 @@ async fn supervise(env: &Env, sender: &EventSender) -> Result<RunOutcome> {
         }
         (Ok(outcome), None) => Ok(outcome),
         (Err(err), None) => {
-            error!(?err, "runner failed");
+            error!(error = %redact::redact(&format!("{err:#}")), "runner failed");
             queue.push(ExecutorEvent::Error {
-                message: err.to_string(),
+                message: format!("{err:#}"),
                 provider_signal: false,
                 timestamp: OffsetDateTime::now_utc(),
             });
@@ -155,7 +158,7 @@ async fn run(env: &Env, sender: &EventSender, queue: &EventQueue) -> Result<RunO
         Some(
             workspace::prepare(checkout, std::path::Path::new(&cfg.working_dir), env)
                 .await
-                .context("preparation du depot de travail")?,
+                .context("workspace preparation failed")?,
         )
     } else {
         None

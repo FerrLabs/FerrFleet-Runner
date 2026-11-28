@@ -16,7 +16,9 @@ use crate::fake_api::{FAST, FakeApi, RUN_ID, Received, Reply};
 use crate::lease::Lost;
 use crate::sender::EventSender;
 
-const POOL_TOKEN: &str = "ffrp_test_pool_token";
+fn pool_token() -> String {
+    crate::test_support::fake_token("ffrp", 3)
+}
 const RUN_TOKEN: &str = "run-token-from-the-lease";
 const LEASE_PATH: &str = "/runner-pools/lease";
 
@@ -34,7 +36,7 @@ fn config(api: &FakeApi) -> AgentConfig {
     let _ = rustls::crypto::ring::default_provider().install_default();
     AgentConfig {
         api_url: api.url.clone(),
-        pool_token: PoolToken::parse(POOL_TOKEN.to_owned()).expect("a pool token"),
+        pool_token: PoolToken::parse(pool_token()).expect("a pool token"),
         runner_name: "build-farm-07".to_owned(),
         work_root: std::env::temp_dir().join(format!("ferrfleet-agent-{}", uuid::Uuid::new_v4())),
     }
@@ -414,7 +416,12 @@ async fn the_pool_token_only_reaches_the_lease_and_the_run_token_only_the_run() 
     let received = api.received();
     assert!(received.iter().any(is_event));
     for r in &received {
-        let expected = if is_lease(r) { POOL_TOKEN } else { RUN_TOKEN };
+        let pool = pool_token();
+        let expected = if is_lease(r) {
+            pool.as_str()
+        } else {
+            RUN_TOKEN
+        };
         assert_eq!(
             r.authorization.as_deref(),
             Some(format!("Bearer {expected}").as_str()),
@@ -703,7 +710,7 @@ async fn a_dispatch_creates_one_run_and_executes_it_like_a_lease() {
     assert_eq!(dispatch.method, "POST");
     assert_eq!(
         dispatch.authorization.as_deref(),
-        Some(&format!("Bearer {POOL_TOKEN}") as &str)
+        Some(&format!("Bearer {}", pool_token()) as &str)
     );
     let body: serde_json::Value = serde_json::from_str(&dispatch.body).unwrap();
     assert_eq!(

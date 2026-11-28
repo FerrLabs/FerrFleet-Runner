@@ -32,6 +32,11 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::config::Env;
+use crate::redact::{redact, tail};
+
+const GITHUB_REMOTE: &str = "https://x-access-token@github.com";
+const STDERR_MAX_LINES: usize = 20;
+const STDERR_MAX_BYTES: usize = 4096;
 
 /// Script temporaire pointé par `GIT_ASKPASS` : a chaque invocation par
 /// `git`, il recupere lui-meme un token aupres de l'API
@@ -118,31 +123,39 @@ impl GitCredentials {
 /// lancement du CLI plutôt que de laisser l'agent travailler dans un dépôt
 /// à moitié prêt.
 pub async fn prepare(checkout: &Checkout, workdir: &Path, run: &Env) -> Result<GitCredentials> {
-    validate_branch_name(&checkout.branch)
-        .context("etape 'validation du nom de branche' de la preparation du depot")?;
+    prepare_from(GITHUB_REMOTE, checkout, workdir, run).await
+}
+
+async fn prepare_from(
+    remote: &str,
+    checkout: &Checkout,
+    workdir: &Path,
+    run: &Env,
+) -> Result<GitCredentials> {
+    validate_branch_name(&checkout.branch).context("step 'branch name validation'")?;
 
     // Créé avant le clone. En cas d'échec de la préparation, il sort de
     // portée ici et son `Drop` supprime le script ; en cas de succès, il est
     // rendu à l'appelant, qui le garde vivant pour la durée du run.
-    let credentials = GitCredentials::create()
-        .context("etape 'preparation du canal d'authentification' de la preparation du depot")?;
+    let credentials = GitCredentials::create().context("step 'git authentication setup'")?;
 
-    clone(checkout, workdir, &credentials, run)
+    clone(remote, checkout, workdir, &credentials, run)
         .await
-        .context("etape 'clone' de la preparation du depot")?;
+        .context("step 'clone'")?;
 
     configure_identity(workdir, run)
         .await
-        .context("etape 'configuration de l'identite git' de la preparation du depot")?;
+        .context("step 'git identity configuration'")?;
 
     checkout_branch(checkout, workdir, &credentials, run)
         .await
-        .context("etape 'checkout de la branche' de la preparation du depot")?;
+        .context("step 'checkout of the branch'")?;
 
     Ok(credentials)
 }
 
 async fn clone(
+    remote: &str,
     checkout: &Checkout,
     workdir: &Path,
     credentials: &GitCredentials,
@@ -151,7 +164,7 @@ async fn clone(
     // Aucun token dans l'URL : seul le nom d'utilisateur "x-access-token"
     // (fixe, non secret) y figure. `git` demande le mot de passe via
     // `GIT_ASKPASS`.
-    let url = format!("https://x-access-token@github.com/{}.git", checkout.repo);
+    let url = format!("{remote}/{}.git", checkout.repo);
 
     let mut cmd = Command::new("git");
     cmd.current_dir(workdir)
@@ -224,7 +237,7 @@ async fn checkout_branch(
             .arg("--")
             .arg(&checkout.branch);
         credentials.apply(&mut fetch_cmd);
-        run_git(fetch_cmd, "git fetch de la branche existante", run).await?;
+        run_git(fetch_cmd, "git fetch of the existing branch", run).await?;
 
         // Un clone `--depth` ne suit que la branche par défaut : le
         // `set-branches` ci-dessus ajoute la branche au refspec d'origin, donc
@@ -243,7 +256,7 @@ async fn checkout_branch(
             .arg(&checkout.branch)
             .arg("--track")
             .arg(format!("refs/remotes/origin/{}", checkout.branch));
-        run_git(checkout_cmd, "git checkout de la branche existante", run).await
+        run_git(checkout_cmd, "git checkout of the existing branch", run).await
     } else {
         info!(branch = %checkout.branch, "creation de la branche de travail");
         let mut cmd = Command::new("git");
@@ -274,32 +287,87 @@ fn validate_branch_name(branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// Lance une commande git et fait échouer avec un message qui nomme
-/// l'étape. Le token n'apparaît plus dans aucun argument depuis le passage
-/// à `GIT_ASKPASS` ; on continue néanmoins à ne jamais faire remonter
-/// stdout/stderr bruts dans le message d'erreur, uniquement le code de
-/// sortie.
+/// Lance une commande git et fait échouer avec un message qui nomme l'étape,
+/// le code de sortie, la cause probable et la sortie d'erreur de git. Le
+/// token n'apparaît dans aucun argument (`GIT_ASKPASS`), mais la sortie est
+/// quand même passée par `redact` avant d'être remontée.
 async fn run_git(mut cmd: Command, step: &str, run: &Env) -> Result<()> {
     run.apply_to(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| format!("lancement de {step}"))?;
+    let output = cmd.output().await.map_err(|err| match err.kind() {
+        std::io::ErrorKind::NotFound => {
+            anyhow::anyhow!("could not start {step}: git binary not found")
+        }
+        _ => anyhow::anyhow!("could not start {step}: {err}"),
+    })?;
     if !output.status.success() {
+        let stderr = tail(
+            &redact(String::from_utf8_lossy(&output.stderr).trim()),
+            STDERR_MAX_LINES,
+            STDERR_MAX_BYTES,
+        );
         bail!(
-            "{step} a echoue avec le statut {}: {}",
+            "{step} failed with exit code {} ({}): {stderr}",
             output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr).trim()
+            classify(&stderr)
         );
     }
     Ok(())
 }
 
+/// Range l'échec dans une cause lisible, d'après ce que git a écrit.
+fn classify(stderr: &str) -> &'static str {
+    let lower = stderr.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+    if has(&["no space left on device", "disk quota exceeded"]) {
+        "out of disk space"
+    } else if has(&[
+        "permission denied",
+        "authentication failed",
+        "could not read username",
+        "could not read password",
+        "returned error: 401",
+        "returned error: 403",
+        "write access to repository not granted",
+        "repository not found",
+        "operation not permitted",
+    ]) {
+        "missing permission"
+    } else if has(&[
+        "remote branch",
+        "couldn't find remote ref",
+        "pathspec",
+        "invalid reference",
+        "not a valid object",
+    ]) {
+        "branch or ref not found"
+    } else if has(&[
+        "could not resolve host",
+        "failed to connect",
+        "connection timed out",
+        "connection refused",
+        "connection reset",
+        "ssl routines",
+        "ssl certificate",
+        "ssl_connect",
+        "tls handshake",
+        "gnutls",
+        "unable to access",
+    ]) {
+        "network failure"
+    } else {
+        "unclassified git failure"
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AskpassScript, GitCredentials, checkout_branch, run_git, validate_branch_name};
+    use super::{
+        AskpassScript, GitCredentials, checkout_branch, classify, prepare_from, run_git,
+        validate_branch_name,
+    };
     use crate::config::Env;
+    use crate::test_support::fake_token;
     use ferrfleet_shared::Checkout;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -407,10 +475,102 @@ mod tests {
             .to_string();
 
         assert!(
-            err.starts_with("git test a echoue avec le statut 1"),
+            err.starts_with("git test failed with exit code 1 (unclassified git failure)"),
             "{err}"
         );
         assert!(err.contains("definitely-not-a-git-command"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_git_binary_is_reported_as_such() {
+        let cmd = Command::new("/nonexistent/ferrfleet-git");
+
+        let err = run_git(cmd, "git test", &test_env())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(err, "could not start git test: git binary not found");
+    }
+
+    #[tokio::test]
+    async fn a_failure_reports_redacted_and_capped_stderr() {
+        let sample = crate::test_support::fake_token("ghs", 1);
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "echo 'remote: https://{sample}@github.com/o/r' >&2; \
+             for i in $(seq 1 100); do echo \"line $i\" >&2; done; exit 3",
+        ));
+
+        let err = run_git(cmd, "git test", &test_env())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.starts_with("git test failed with exit code 3"), "{err}");
+        assert!(!err.contains(&sample), "{err}");
+        assert!(!err.contains("line 80\n"), "{err}");
+        assert!(err.ends_with("line 100"), "{err}");
+        assert_eq!(err.matches("line ").count(), 20, "{err}");
+    }
+
+    #[test]
+    fn classify_names_the_cause() {
+        assert_eq!(
+            classify("write error: No space left on device"),
+            "out of disk space"
+        );
+        assert_eq!(
+            classify("remote: Write access to repository not granted.\nfatal: unable to access"),
+            "missing permission"
+        );
+        assert_eq!(
+            classify("fatal: Could not resolve host: github.com"),
+            "network failure"
+        );
+        assert_eq!(
+            classify("fatal: Remote branch foo not found in upstream origin"),
+            "branch or ref not found"
+        );
+        assert_eq!(classify("boom"), "unclassified git failure");
+        assert_eq!(
+            classify("fatal: couldn't find remote ref refs/heads/tls-fix"),
+            "branch or ref not found"
+        );
+        assert_eq!(
+            classify("fatal: Remote branch ssl-fix not found in upstream origin"),
+            "branch or ref not found"
+        );
+        assert_eq!(
+            classify("fatal: couldn't find remote ref refs/heads/openssl-bump"),
+            "branch or ref not found"
+        );
+        assert_eq!(
+            classify("fatal: unable to access: error:0A000126:SSL routines"),
+            "network failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_clone_reports_the_step_exit_code_and_stderr() {
+        let root = TempRoot(std::env::temp_dir().join(format!("ws-{}", Uuid::new_v4())));
+        std::fs::create_dir_all(&root.0).unwrap();
+        let checkout = Checkout {
+            repo: "o/r".to_owned(),
+            base_branch: Some("no-such-branch".to_owned()),
+            branch: "work".to_owned(),
+            existing: false,
+        };
+        let missing = format!("file://{}/missing", root.display());
+
+        let err = match prepare_from(&missing, &checkout, &root, &test_env()).await {
+            Ok(_) => panic!("the clone must fail"),
+            Err(err) => format!("{err:#}"),
+        };
+
+        assert!(err.contains("step 'clone'"), "{err}");
+        assert!(err.contains("git clone failed with exit code"), "{err}");
+        assert!(err.contains("fatal"), "{err}");
     }
 
     #[test]
@@ -560,30 +720,39 @@ mod tests {
         )
     }
 
-    const TOKEN_BODY: &str = r#"{"token":"ghs_abc"}"#;
+    fn token() -> String {
+        fake_token("ghs", 5)
+    }
+
+    fn token_body() -> String {
+        format!(r#"{{"token":"{}"}}"#, token())
+    }
 
     #[test]
     fn askpass_script_retries_a_refused_connection_then_prints_the_token() {
-        let curl = scripted_curl(&[("", "000", 7), ("", "000", 7), (TOKEN_BODY, "200", 0)]);
+        let body = token_body();
+        let curl = scripted_curl(&[("", "000", 7), ("", "000", 7), (body.as_str(), "200", 0)]);
         let (output, calls) = askpass_with_fake_tools(&curl);
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ghs_abc");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), token());
         assert_eq!(calls.lines().count(), 3);
     }
 
     #[test]
     fn askpass_script_retries_a_503_then_prints_the_token() {
-        let curl = scripted_curl(&[("", "503", 0), (TOKEN_BODY, "200", 0)]);
+        let body = token_body();
+        let curl = scripted_curl(&[("", "503", 0), (body.as_str(), "200", 0)]);
         let (output, calls) = askpass_with_fake_tools(&curl);
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ghs_abc");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), token());
         assert_eq!(calls.lines().count(), 2);
     }
 
     #[test]
     fn askpass_script_does_not_retry_a_502_or_504() {
         for status in ["502", "504"] {
-            let curl = scripted_curl(&[("", status, 0), (TOKEN_BODY, "200", 0)]);
+            let body = token_body();
+            let curl = scripted_curl(&[("", status, 0), (body.as_str(), "200", 0)]);
             let (output, calls) = askpass_with_fake_tools(&curl);
             assert!(!output.status.success(), "{status}");
             assert_eq!(output.stdout, b"", "{status}");
@@ -607,10 +776,11 @@ mod tests {
             "Username for 'https://github.com': ",
             "Password for 'https://github.com/owner/repo': ",
         ] {
-            let curl = scripted_curl(&[(TOKEN_BODY, "200", 0)]);
+            let body = token_body();
+            let curl = scripted_curl(&[(body.as_str(), "200", 0)]);
             let (output, _) = askpass_with_prompt(&curl, prompt);
             assert!(output.status.success(), "{prompt}");
-            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ghs_abc");
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), token());
         }
     }
 
@@ -623,7 +793,8 @@ mod tests {
             "Password for 'http://github.com': ",
             "",
         ] {
-            let curl = scripted_curl(&[(TOKEN_BODY, "200", 0)]);
+            let body = token_body();
+            let curl = scripted_curl(&[(body.as_str(), "200", 0)]);
             let (output, calls) = askpass_with_prompt(&curl, prompt);
             assert!(!output.status.success(), "{prompt}");
             assert_eq!(output.stdout, b"", "{prompt}");
